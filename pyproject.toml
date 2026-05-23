@@ -1,5 +1,5 @@
 [project]
-name = "kubeflow-mcp"
+name = "Krishna-kubeflow-mcp"
 version = "0.1.0rc1"
 requires-python = ">=3.10"
 description = "Model Context Protocol server for AI-assisted development with Kubeflow"
