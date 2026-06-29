@@ -41,6 +41,10 @@ verify: install-dev ## Run the same checks CI runs (pre-commit + lockfile)
 	@uv run pre-commit run --all-files
 	@echo "All checks passed!"
 
+.PHONY: check-version
+check-version: ## Verify pyproject.toml and __init__.py versions match
+	@python3 scripts/check_version.py
+
 format: ## Auto-format and fix lint issues
 	@uv run --group dev ruff check --fix .
 	@uv run --group dev ruff format .
