@@ -6,15 +6,9 @@ status: provisional
 creation-date: 2025-06-02
 ---
 
-# KEP#0001: Katib (Optimizer) Client Support for kubeflow-mcp-server
+# KEP-34: Katib (Optimizer) Client Support for kubeflow-mcp-server
 
 ## Summary
-
-The Kubeflow MCP Server exposes Kubeflow Training operations as
-[Model Context Protocol](https://modelcontextprotocol.io/) tools, enabling AI
-agents to plan, submit, monitor, and manage training jobs through natural
-language. However, hyperparameter optimization -- a critical step in the ML
-workflow -- remains inaccessible through MCP.
 
 This KEP proposes implementing the **Optimizer client module** for
 `kubeflow-mcp-server`, exposing Katib's Experiment, Trial, and Suggestion
@@ -117,6 +111,13 @@ kubeflow_mcp/optimizer/
     troubleshooting.md # Common Katib errors and fixes
 ```
 
+> **Note — Stub alignment**: The existing `optimizer/api/__init__.py` stub
+> declares planned tools (e.g., `create_optimization_job`) using the confirmed
+> pattern. The tool names proposed in this KEP (`create_hpo_experiment`, etc.)
+> intentionally replace the stub placeholders to align with Katib SDK semantics.
+> The stub's contributor guide and confirmed-pattern example remain valid for
+> the implementation phase.
+
 ### Key Design Decisions
 
 **Experiment creation decomposition**: The Katib SDK's `create_experiment()`
@@ -146,7 +147,14 @@ in `common/utils.py`. Lazy import -- `kubeflow.katib` is only imported when
 
 | Tool | Description | SDK Method |
 |------|-------------|------------|
-| `katib_pre_flight` | Verify Katib CRD, controller health, suggestion algorithm availability | `CustomObjectsApi` + `CoreV1Api` |
+| `katib_pre_flight` | Verify Katib CRD, controller health, suggestion algorithm availability, and namespace-level Katib config (e.g., default suggestion image, resource quotas) | `CustomObjectsApi` + `CoreV1Api` |
+
+> **Scope note**: The trainer's `pre_flight()` is a compound tool covering
+> 4 sub-checks (compatibility, cluster resources, estimate, runtimes). This
+> `katib_pre_flight` is narrower by design — it validates Katib-specific
+> readiness only. Namespace-level Katib configuration (default suggestion
+> images, controller config) is included in the check to ensure experiments
+> can be created in the target namespace.
 
 #### Optimization
 
@@ -184,6 +192,16 @@ in `common/utils.py`. Lazy import -- `kubeflow.katib` is only imported when
 | `delete_experiment` | Delete experiment and associated trials/suggestions | `delete_experiment()` |
 | `update_experiment` | Suspend or resume experiment (patch resumePolicy) | `CustomObjectsApi` patch |
 
+> **Clarification on `update_experiment` semantics**: Katib's `resumePolicy`
+> field (`Never`, `FromVolume`, `LongRunning`) controls whether an experiment
+> can restart *after completion*, which differs from the trainer's
+> `update_training_job(action="suspend")` that uses TrainJob's native `suspend`
+> field for mid-execution pause. The `update_experiment` tool patches
+> `spec.resumePolicy` and, when `action="suspend"`, sets the experiment's
+> `parallelTrialCount` to 0 to effectively halt new trial creation. This is
+> the established Katib pattern for pausing experiments, since Katib lacks a
+> first-class suspend field.
+
 All read-only tools: `readOnlyHint=True`, `idempotentHint=True`.
 Mutating tools: `create_*` are not idempotent; `delete_experiment` is destructive; `update_experiment` is idempotent.
 `wait_for_experiment`: `readOnlyHint=True`, blocking. Default `polling_interval=15s`, `timeout_seconds` capped at 3600s. Agents should prefer `get_experiment_status()` for non-blocking polling.
@@ -197,7 +215,7 @@ lacks coverage, following the trainer's pattern for suspend/resume.
 | Persona | Optimizer Tools |
 |---------|----------------|
 | `readonly` | All read-only tools (13 tools: planning + discovery + monitoring) |
-| `data-scientist` | readonly + `create_hpo_experiment`, `wait_for_experiment`, `delete_experiment` (MCP-owned only) |
+| `data-scientist` | readonly + `create_hpo_experiment`, `delete_experiment` (MCP-owned only) |
 | `ml-engineer` | data-scientist + `create_experiment_from_spec`, `update_experiment` |
 | `platform-admin` | all (wildcard) |
 
@@ -237,7 +255,7 @@ PHASE_TO_SECTION = {
 PLANNING (always do first):
 - katib_pre_flight() -> Verify Katib CRD, controller, suggestion algorithms
 - If blockers returned, STOP and inform user
-- When both clients active, trainer.pre_flight() covers cluster/GPU;
+- When both clients active, pre_flight() covers cluster/GPU;
   katib_pre_flight() covers Katib-specific readiness
 DISCOVERY:
 - list_experiments() -> find existing experiments
@@ -255,7 +273,7 @@ RULES:
 - ALWAYS preview first (confirmed=False)
 - maxTrialCount is required, no unbounded default
 - Use early_stopping with medianstop for long-running trials
-- Trial templates can reference TrainJobs — use trainer.list_runtimes() first
+- Trial templates can reference TrainJobs — use list_runtimes() first
 ```
 
 **Monitoring** (all personas):
@@ -275,11 +293,51 @@ MONITORING AND LIFECYCLE:
 
 ### SDK Compatibility Update
 
+#### SDK Method → MCP Tool Mapping
+
+The following table shows the 1:1 mapping between `KatibClient` SDK methods and
+the MCP tools that wrap them:
+
+| SDK Method (`KatibClient`) | MCP Tool | Notes |
+|---------------------------|----------|-------|
+| `create_experiment()` | `create_hpo_experiment` | Flat-param decomposition; also used by `create_experiment_from_spec` |
+| `get_experiment()` | `get_experiment` | |
+| `list_experiments()` | `list_experiments` | |
+| `delete_experiment()` | `delete_experiment` | |
+| `get_experiment_status()` | `get_experiment_status` | Lightweight status-only check |
+| `is_experiment_succeeded()` | *(used internally)* | Called within `wait_for_experiment` polling loop |
+| `get_optimal_hyperparameters()` | `get_best_trial` | |
+| `wait_for_experiment_condition()` | `wait_for_experiment` | |
+| `get_suggestion()` | `get_suggestion` | |
+| `get_success_trial_details()` | `get_successful_trials` | |
+| `get_job_logs()` | `get_experiment_trial_logs` | |
+| `list_trials()` | `get_experiment_trials` | See note below on sub-SDK tools |
+| `get_trial()` | `get_trial` | See note below on sub-SDK tools |
+
+#### Tools Beyond SDK Abstraction
+
+The following MCP tools intentionally go deeper than the `KatibClient` SDK
+abstraction, which treats Trials and Suggestions as internal implementation
+details:
+
+- **`get_trial`**: The SDK does not expose individual trial inspection.
+  MCP exposes this because agents need per-trial parameter/metric detail
+  to reason about experiment progress and debug failing trials.
+- **`list_suggestions`**: The SDK does not expose suggestion listing.
+  MCP exposes this for debugging suggestion algorithm status and capacity.
+- **`get_suggestion`**: While the SDK has `get_suggestion()`, MCP surfaces
+  additional algorithm status metadata useful for agent-driven diagnostics.
+
+These tools use `CustomObjectsApi` directly to access Trial and Suggestion CRs.
+
+#### SDK Compatibility Snippet
+
 ```python
 "optimizer": {
     "status": "implemented",
     "sdk_client": "kubeflow.katib.KatibClient",
-    "sdk_version_min": "0.19.0",
+    # sdk_version_min is defined at the top-level schema, not per-client.
+    # KatibClient is included in kubeflow >= 0.4.0 (Katib SDK >= 0.19.0).
     "covered_methods": [
         "create_experiment", "get_experiment", "list_experiments",
         "delete_experiment", "get_experiment_status",
@@ -306,20 +364,20 @@ MONITORING AND LIFECYCLE:
 A typical agent-driven HPO workflow spans both clients:
 
 ```
-trainer.pre_flight()               # Validate cluster, GPU availability
+pre_flight()                       # Validate cluster, GPU availability
 katib_pre_flight()                 # Validate Katib readiness
-trainer.list_runtimes()            # Find training runtimes
+list_runtimes()                    # Find training runtimes
 create_hpo_experiment()            # Create experiment with TrainJob trial template
 wait_for_experiment()              # Wait for completion
 get_best_trial()                   # Get optimal hyperparameters
-trainer.fine_tune()                # Retrain with best config
+fine_tune()                        # Retrain with best config
 ```
 
 Key `TOOL_NEXT_HINTS` bridging both clients:
 
 | Tool | Next Hint |
 |------|-----------|
-| `trainer.wait_for_training` | "Use `create_hpo_experiment()` to optimize hyperparameters" |
+| `wait_for_training` | "Use `create_hpo_experiment()` to optimize hyperparameters" |
 | `create_hpo_experiment` | "Monitor with `get_experiment_status()` or `wait_for_experiment()`" |
 | `wait_for_experiment` | "Use `get_best_trial()` for optimal hyperparameters" |
 | `get_best_trial` | "Use `fine_tune()` to retrain with these hyperparameters" |
