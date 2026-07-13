@@ -26,6 +26,27 @@ but they are blocked from production PyPI publish by default.
 If a GitHub Release is published for a prerelease version, the workflow keeps
 the GitHub Release marked as prerelease and skips production PyPI publish.
 
+## Branch and Tag Contract
+
+### Branches
+
+| Branch | Purpose | Publishable? |
+| --- | --- | --- |
+| `main` | Development trunk. Pre-release dry runs (`workflow_dispatch`) are allowed. | Test PyPI only |
+| `release-X.Y` | Cut from `main` when stabilising a minor release. RC tags and stable tags are created here. Cherry-picks from `main` go here for patch fixes. | Test PyPI and PyPI |
+| Feature branches | All other branches (`feat/*`, `fix/*`, etc.). | **Never** — `workflow_dispatch` is locked to `main` and `release-*` via a `branches` filter. |
+
+### Tags
+
+Tags must follow PEP 440 version strings. A `v` prefix is accepted and
+automatically stripped by the version check script (e.g., `v0.1.0` matches
+`0.1.0` in `pyproject.toml`).
+
+| Tag format | Example | Usage |
+| --- | --- | --- |
+| `X.Y.Z` or `vX.Y.Z` | `0.1.0` | Stable release |
+| `X.Y.ZrcN` or `vX.Y.ZrcN` | `0.1.0rc1` | Release candidate |
+
 ## Release Paths
 
 The workflow has two supported paths:
