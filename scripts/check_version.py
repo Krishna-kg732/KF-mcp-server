@@ -37,8 +37,9 @@ import ast
 import os
 import re
 import sys
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 _ROOT = Path(__file__).resolve().parent.parent
 _PYPROJECT = _ROOT / "pyproject.toml"
@@ -116,12 +117,14 @@ def main() -> None:
         )
         raise SystemExit(1)
 
-    if args.release_tag and args.release_tag != project_version:
-        print(
-            f"ERROR: Release tag {args.release_tag!r} does not match project version {project_version!r}",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
+    if args.release_tag:
+        tag = args.release_tag.removeprefix("v")
+        if tag != project_version:
+            print(
+                f"ERROR: Release tag {args.release_tag!r} does not match project version {project_version!r}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
 
     prerelease = is_prerelease(project_version)
     print(f"Pre-release:      {prerelease}")

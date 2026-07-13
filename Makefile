@@ -46,9 +46,6 @@ check-version: ## Verify pyproject.toml and __init__.py versions match
 	@python3 scripts/check_version.py
 
 .PHONY: format
-format: ## Auto-fix lint and formatting issues
-	@uv run ruff check --fix .
-	@uv run ruff format .
 format: ## Auto-format and fix lint issues
 	@uv run --group dev ruff check --fix .
 	@uv run --group dev ruff format .

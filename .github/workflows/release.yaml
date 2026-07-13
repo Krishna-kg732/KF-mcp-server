@@ -2,6 +2,9 @@ name: Release
 
 on:
   workflow_dispatch:
+    branches:
+      - main
+      - 'release-*'
     inputs:
       version:
         description: 'Expected version (must match pyproject.toml and __init__.py)'
