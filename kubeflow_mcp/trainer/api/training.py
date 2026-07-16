@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from kubeflow.trainer.constants.constants import DEFAULT_PIP_INDEX_URLS
+from kubeflow.trainer.constants.constants import DATASET_PATH, DEFAULT_PIP_INDEX_URLS
 
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import PreviewResponse, ToolError, ToolResponse
@@ -112,7 +112,6 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
     if not lines:
         lines = ["pass"]
 
-
     if func_args:
         params = ", ".join(f"{k}=None" for k in func_args)
         wrapped = f"def {func_name}({params}):\n"
@@ -135,9 +134,8 @@ def _make_train_func(script: str, func_args: dict[str, Any] | None = None) -> Ca
     exec(code, ns)  # noqa: S102
     return ns[func_name]
 
-def _uncalled_train_call(
-    script: str, func_args: dict[str, Any] | None = None
-) -> list[str]:
+
+def _uncalled_train_call(script: str, func_args: dict[str, Any] | None = None) -> list[str]:
     """Return lines to append when a script defines but does not call train.
 
     Returns an empty list when no call needs to be appended.
@@ -150,8 +148,7 @@ def _uncalled_train_call(
     train_defs = (
         node
         for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "train"
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "train"
     )
     train_def = next(train_defs, None)
     if train_def is None or _has_train_call(tree.body):
@@ -159,14 +156,10 @@ def _uncalled_train_call(
 
     # Guard: if train() has required params and no func_args are provided,
     if not func_args and _has_required_params(train_def):
-        raise ValueError(
-            "User-defined train() requires parameters but no func_args were provided."
-        )
+        raise ValueError("User-defined train() requires parameters but no func_args were provided.")
 
     forwarded_args = _forwarded_train_args(train_def, func_args)
-    call_str = (
-        f"train({forwarded_args})" if forwarded_args else "train()"
-    )
+    call_str = f"train({forwarded_args})" if forwarded_args else "train()"
 
     if isinstance(train_def, ast.AsyncFunctionDef):
         return ["import asyncio", f"asyncio.run({call_str})"]
@@ -220,13 +213,8 @@ def _forwarded_train_args(
     if train_def.args.kwarg is not None:
         forwarded = func_args
     else:
-        accepted_names = {
-            arg.arg
-            for arg in [*train_def.args.args, *train_def.args.kwonlyargs]
-        }
-        unaccepted = [
-            key for key in func_args if key not in accepted_names
-        ]
+        accepted_names = {arg.arg for arg in [*train_def.args.args, *train_def.args.kwonlyargs]}
+        unaccepted = [key for key in func_args if key not in accepted_names]
         if unaccepted:
             raise ValueError(
                 "User-defined train() signature does not accept "
@@ -235,6 +223,7 @@ def _forwarded_train_args(
         forwarded = func_args
 
     return ", ".join(f"{key}={key}" for key in forwarded)
+
 
 def _get_client(namespace: str | None = None) -> Any:
     """Return a client targeting the given namespace.
@@ -256,6 +245,19 @@ def _inject_ownership_label(options: list) -> list:
             return options
     options.append(Labels(labels={MCP_MANAGED_LABEL: MCP_MANAGED_VALUE}))
     return options
+
+
+def _should_apply_hf_dataset_workaround(dataset: str) -> bool:
+    """Return True if dataset is a top-level HuggingFace URI that triggers SDK bug #32.
+
+    HuggingFace dataset IDs are always ``org/name`` (exactly 2 segments).
+    Single-segment URIs like ``hf://ds`` are invalid and rejected.
+    URIs with subpaths like ``hf://org/ds/subpath`` don't trigger the bug.
+    """
+    if not dataset.startswith("hf://"):
+        return False
+    hf_repo = dataset.removeprefix("hf://").strip("/")
+    return bool(hf_repo and len(hf_repo.split("/")) == 2)
 
 
 def _sdk_error(e: Exception, hint: str | None = None) -> dict[str, Any]:
@@ -864,6 +866,14 @@ def fine_tune(
         )
         if name:
             options.append(Name(name=name))
+
+        # Workaround for SDK bug where top-level HF datasets construct
+        # invalid torchtune dataset.data_dir=/workspace/dataset/.
+        # We override the torchtune CLI args directly via TrainerArgs.
+        if _should_apply_hf_dataset_workaround(dataset):
+            options.append(
+                TrainerArgs(args=[f"dataset.source={DATASET_PATH}", "dataset.data_dir=null"])
+            )
 
         client = _get_client(namespace)
         initializer = _build_initializer(
