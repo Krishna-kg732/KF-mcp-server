@@ -55,8 +55,7 @@ and namespace enforcement infrastructure.
 
 | Component | Version | Notes |
 |-----------|---------|-------|
-| `kubeflow` (unified SDK) | >= 0.4.0 | Provides `kubeflow.katib.KatibClient` |
-| `kubeflow-katib` (Katib SDK) | >= 0.19.0 | v1beta1 CRD types and client methods |
+| `kubeflow` (unified SDK) | >= 0.4.0 | Provides `kubeflow.optimizer.OptimizerClient`; bundles `kubeflow_katib_api` (v1beta1 CRD types) |
 | Kubeflow Trainer | >= v2.2.0 | Required when trial templates use TrainJobs |
 | Kubernetes | >= 1.27 | Matches existing MCP server requirement |
 | Python | >= 3.10 | Matches existing MCP server requirement |
@@ -67,8 +66,9 @@ and namespace enforcement infrastructure.
    and suggestion lifecycle (see MCP Tools tables)
 2. Decompose experiment creation into agent-friendly tools, following the
    trainer's `fine_tune`/`run_custom_training`/`run_container_training` pattern
-3. Use `kubeflow.katib.KatibClient` as primary interface, with
-   `CustomObjectsApi` fallback where the SDK lacks coverage
+3. Use `kubeflow.optimizer.OptimizerClient` as primary interface, with
+   `CustomObjectsApi` + `kubeflow_katib_api` models fallback where the SDK
+   lacks coverage (early stopping, raw spec creation, suggestions)
 4. Follow TrainerClient structural patterns and integrate with existing server
    infrastructure (personas, audit, rate limiting, circuit breaker, namespaces)
 5. Two-phase confirmation for all mutating operations
@@ -82,8 +82,10 @@ and namespace enforcement infrastructure.
 - **Katib UI replacement**: MCP tools complement the dashboard.
 - **Katib DB Manager direct access**: `get_trial_metrics()` requires gRPC;
   trial metrics are available via CRD status instead.
-- **`tune()` API wrapping**: Requires Python callables, not serializable via MCP.
-- **`edit_experiment_budget()`**: Deferred to a follow-up.
+- **Legacy `tune()` API wrapping**: Was a `KatibClient` method requiring Python
+  callables; not serializable via MCP. No equivalent in `OptimizerClient`.
+- **Budget patching on running jobs**: `TrialConfig` is set at creation time;
+  dynamic budget changes require `CustomObjectsApi` patch. Deferred to a follow-up.
 
 ## Proposal
 
@@ -120,21 +122,25 @@ kubeflow_mcp/optimizer/
 
 ### Key Design Decisions
 
-**Experiment creation decomposition**: The Katib SDK's `create_experiment()`
-accepts a full `V1beta1Experiment` object, not flat parameters. This KEP
-decomposes it into two tools:
+**Experiment creation decomposition**: `OptimizerClient.optimize()` accepts
+typed Python objects (`TrainJobTemplate`, `Search.*`, `TrialConfig`, `Objective`,
+`BaseAlgorithm`) but does not expose early stopping, custom metrics collectors,
+or resume policies. This KEP decomposes creation into two tools:
 
 - `create_hpo_experiment`: Flat parameters (objective, search space, algorithm,
-  trial template, early stopping). Constructs `V1beta1Experiment` internally.
-  Supports early stopping algorithms (e.g., `medianstop`) to prune
-  underperforming trials.
+  trial template, early stopping). Uses `OptimizerClient.optimize()` for the
+  common case; when early stopping is requested, constructs a
+  `V1beta1Experiment` via `kubeflow_katib_api` models and creates it through
+  `CustomObjectsApi` directly.
 - `create_experiment_from_spec`: Full `V1beta1Experiment` JSON spec for
-  advanced use cases (custom metrics collectors, resume policies).
+  advanced use cases (custom metrics collectors, resume policies, NAS configs).
+  Validates the spec via `kubeflow_katib_api.models.V1beta1Experiment.from_dict()`
+  and creates it through `CustomObjectsApi`.
 
 Both use two-phase confirmation and produce the same response schema.
 
-**Client factory**: `get_katib_client()` singleton with per-namespace variant
-in `common/utils.py`. Lazy import -- `kubeflow.katib` is only imported when
+**Client factory**: `get_optimizer_client()` singleton with per-namespace variant
+in `common/utils.py`. Lazy import -- `kubeflow.optimizer` is only imported when
 `--clients optimizer` is active.
 
 **RBAC**: Service account needs get/list/create/delete/patch on `experiments`,
@@ -145,8 +151,8 @@ in `common/utils.py`. Lazy import -- `kubeflow.katib` is only imported when
 
 #### Planning
 
-| Tool | Description | SDK Method |
-|------|-------------|------------|
+| Tool | Description | Underlying API |
+|------|-------------|----------------|
 | `katib_pre_flight` | Verify Katib CRD, controller health, suggestion algorithm availability, and namespace-level Katib config (e.g., default suggestion image, resource quotas) | `CustomObjectsApi` + `CoreV1Api` |
 
 > **Scope note**: The trainer's `pre_flight()` is a compound tool covering
@@ -158,38 +164,38 @@ in `common/utils.py`. Lazy import -- `kubeflow.katib` is only imported when
 
 #### Optimization
 
-| Tool | Description | SDK Method |
-|------|-------------|------------|
-| `create_hpo_experiment` | Create HPO experiment from flat params (objective, search space, algorithm, trial template, early stopping) | `create_experiment()` |
-| `create_experiment_from_spec` | Create experiment from complete V1beta1Experiment JSON spec | `create_experiment()` |
+| Tool | Description | Underlying API |
+|------|-------------|----------------|
+| `create_hpo_experiment` | Create HPO experiment from flat params (objective, search space, algorithm, trial template, early stopping) | `OptimizerClient.optimize()` (simple) / `CustomObjectsApi` (with early stopping) |
+| `create_experiment_from_spec` | Create experiment from complete V1beta1Experiment JSON spec | `CustomObjectsApi` + `kubeflow_katib_api` models |
 
 #### Discovery
 
-| Tool | Description | SDK Method |
-|------|-------------|------------|
-| `get_experiment` | Experiment status, best trial, trial counts, conditions, early stopping config | `get_experiment()` |
-| `list_experiments` | List experiments with optional status filter | `list_experiments()` |
-| `get_experiment_status` | Lightweight status-only check (status string + trial counts) | `get_experiment_status()` |
-| `get_trial` | Detailed trial status, parameters, and metrics by name | `get_trial()` |
-| `get_successful_trials` | All succeeded trials with hyperparameters and metrics | `get_success_trial_details()` |
+| Tool | Description | Underlying API |
+|------|-------------|----------------|
+| `get_experiment` | Experiment status, best trial, trial counts, conditions, early stopping config | `OptimizerClient.get_job()` |
+| `list_experiments` | List experiments with optional status filter | `OptimizerClient.list_jobs()` |
+| `get_experiment_status` | Lightweight status-only check (status string + trial counts) | `OptimizerClient.get_job()` → extract `.status` + trial counts |
+| `get_trial` | Detailed trial status, parameters, and metrics by name | `OptimizerClient.get_job()` → filter `.trials` by name |
+| `get_successful_trials` | All succeeded trials with hyperparameters and metrics | `OptimizerClient.get_job()` → filter `.trials` by status |
 | `list_suggestions` | List suggestion resources in namespace | `CustomObjectsApi` |
 
 #### Monitoring
 
-| Tool | Description | SDK Method |
-|------|-------------|------------|
-| `get_experiment_trials` | List trials with status filter (includes `EarlyStopped`) | `list_trials()` |
-| `get_best_trial` | Best trial with hyperparameters and metrics | `get_optimal_hyperparameters()` |
-| `get_suggestion` | Suggestion algorithm status and count | `get_suggestion()` |
-| `wait_for_experiment` | Poll until terminal state | `wait_for_experiment_condition()` |
-| `get_experiment_trial_logs` | Pod logs with failure pattern detection | `get_job_logs()` |
-| `get_experiment_events` | K8s events for experiment and trials | `CoreV1Api.list_namespaced_event` |
+| Tool | Description | Underlying API |
+|------|-------------|----------------|
+| `get_experiment_trials` | List trials with status filter (includes `EarlyStopped`) | `OptimizerClient.get_job()` → `.trials` |
+| `get_best_trial` | Best trial with hyperparameters and metrics | `OptimizerClient.get_best_results()` |
+| `get_suggestion` | Suggestion algorithm status and count | `CustomObjectsApi` |
+| `wait_for_experiment` | Poll until terminal state | `OptimizerClient.wait_for_job_status()` |
+| `get_experiment_trial_logs` | Pod logs with failure pattern detection | `OptimizerClient.get_job_logs()` |
+| `get_experiment_events` | K8s events for experiment and trials | `OptimizerClient.get_job_events()` |
 
 #### Lifecycle
 
-| Tool | Description | SDK Method |
-|------|-------------|------------|
-| `delete_experiment` | Delete experiment and associated trials/suggestions | `delete_experiment()` |
+| Tool | Description | Underlying API |
+|------|-------------|----------------|
+| `delete_experiment` | Delete experiment and associated trials/suggestions | `OptimizerClient.delete_job()` |
 | `update_experiment` | Suspend or resume experiment (patch resumePolicy) | `CustomObjectsApi` patch |
 
 > **Clarification on `update_experiment` semantics**: Katib's `resumePolicy`
@@ -206,9 +212,10 @@ All read-only tools: `readOnlyHint=True`, `idempotentHint=True`.
 Mutating tools: `create_*` are not idempotent; `delete_experiment` is destructive; `update_experiment` is idempotent.
 `wait_for_experiment`: `readOnlyHint=True`, blocking. Default `polling_interval=15s`, `timeout_seconds` capped at 3600s. Agents should prefer `get_experiment_status()` for non-blocking polling.
 
-`list_suggestions`, `update_experiment`, `get_experiment_events`, and
-`katib_pre_flight` use `CustomObjectsApi`/`CoreV1Api` directly where the SDK
-lacks coverage, following the trainer's pattern for suspend/resume.
+`list_suggestions`, `get_suggestion`, `update_experiment`, and
+`katib_pre_flight` use `CustomObjectsApi`/`CoreV1Api` directly where
+`OptimizerClient` lacks coverage. `get_experiment_events` is now covered by
+`OptimizerClient.get_job_events()`.
 
 ### Persona Coverage
 
@@ -295,65 +302,65 @@ MONITORING AND LIFECYCLE:
 
 #### SDK Method → MCP Tool Mapping
 
-The following table shows the 1:1 mapping between `KatibClient` SDK methods and
+The following table shows the mapping between `OptimizerClient` SDK methods and
 the MCP tools that wrap them:
 
-| SDK Method (`KatibClient`) | MCP Tool | Notes |
-|---------------------------|----------|-------|
-| `create_experiment()` | `create_hpo_experiment` | Flat-param decomposition; also used by `create_experiment_from_spec` |
-| `get_experiment()` | `get_experiment` | |
-| `list_experiments()` | `list_experiments` | |
-| `delete_experiment()` | `delete_experiment` | |
-| `get_experiment_status()` | `get_experiment_status` | Lightweight status-only check |
-| `is_experiment_succeeded()` | *(used internally)* | Called within `wait_for_experiment` polling loop |
-| `get_optimal_hyperparameters()` | `get_best_trial` | |
-| `wait_for_experiment_condition()` | `wait_for_experiment` | |
-| `get_suggestion()` | `get_suggestion` | |
-| `get_success_trial_details()` | `get_successful_trials` | |
-| `get_job_logs()` | `get_experiment_trial_logs` | |
-| `list_trials()` | `get_experiment_trials` | See note below on sub-SDK tools |
-| `get_trial()` | `get_trial` | See note below on sub-SDK tools |
+| SDK Method (`OptimizerClient`) | MCP Tool(s) | Notes |
+|-------------------------------|-------------|-------|
+| `optimize()` | `create_hpo_experiment` | Flat-param decomposition; simple cases go through SDK |
+| `get_job()` | `get_experiment`, `get_experiment_status`, `get_trial`, `get_successful_trials`, `get_experiment_trials` | Single SDK call; MCP tools extract different views (full status, status-only, per-trial, filtered trials) |
+| `list_jobs()` | `list_experiments` | |
+| `delete_job()` | `delete_experiment` | |
+| `get_best_results()` | `get_best_trial` | |
+| `wait_for_job_status()` | `wait_for_experiment` | Status set maps to `{Complete, Failed}` |
+| `get_job_logs()` | `get_experiment_trial_logs` | Supports per-trial log retrieval |
+| `get_job_events()` | `get_experiment_events` | |
 
 #### Tools Beyond SDK Abstraction
 
-The following MCP tools intentionally go deeper than the `KatibClient` SDK
-abstraction, which treats Trials and Suggestions as internal implementation
-details:
+The following MCP tools go beyond what `OptimizerClient` exposes directly:
 
-- **`get_trial`**: The SDK does not expose individual trial inspection.
-  MCP exposes this because agents need per-trial parameter/metric detail
-  to reason about experiment progress and debug failing trials.
-- **`list_suggestions`**: The SDK does not expose suggestion listing.
-  MCP exposes this for debugging suggestion algorithm status and capacity.
-- **`get_suggestion`**: While the SDK has `get_suggestion()`, MCP surfaces
-  additional algorithm status metadata useful for agent-driven diagnostics.
+- **`create_experiment_from_spec`**: `OptimizerClient.optimize()` accepts typed
+  Python objects and does not support raw `V1beta1Experiment` JSON, custom
+  metrics collectors, or resume policies. This tool uses `CustomObjectsApi`
+  with `kubeflow_katib_api` models to create experiments from complete specs.
+- **`create_hpo_experiment` (early stopping path)**: When early stopping is
+  requested, the tool bypasses `optimize()` and constructs a `V1beta1Experiment`
+  with `V1beta1EarlyStoppingSpec` via `CustomObjectsApi`.
+- **`get_trial`**: While `OptimizerClient.get_job()` returns all trials in
+  `OptimizationJob.trials`, MCP provides individual trial lookup by name
+  for targeted debugging.
+- **`list_suggestions`**: `OptimizerClient` does not expose Suggestion CRs.
+  MCP uses `CustomObjectsApi` for debugging suggestion algorithm status.
+- **`get_suggestion`**: Same — uses `CustomObjectsApi` for detailed algorithm
+  status metadata useful for agent-driven diagnostics.
+- **`update_experiment`**: `OptimizerClient` has no update/patch method.
+  Uses `CustomObjectsApi` patch.
 
-These tools use `CustomObjectsApi` directly to access Trial and Suggestion CRs.
+These tools use `CustomObjectsApi` directly to access Experiment, Trial, and
+Suggestion CRs via `kubeflow_katib_api` models.
 
 #### SDK Compatibility Snippet
 
 ```python
 "optimizer": {
     "status": "implemented",
-    "sdk_client": "kubeflow.katib.KatibClient",
-    # sdk_version_min is defined at the top-level schema, not per-client.
-    # KatibClient is included in kubeflow >= 0.4.0 (Katib SDK >= 0.19.0).
+    "sdk_client": "kubeflow.optimizer.OptimizerClient",
+    # OptimizerClient is included in kubeflow >= 0.4.0.
+    # CRD types are provided by kubeflow_katib_api >= 0.19.0 (bundled).
     "covered_methods": [
-        "create_experiment", "get_experiment", "list_experiments",
-        "delete_experiment", "get_experiment_status",
-        "is_experiment_succeeded", "get_optimal_hyperparameters",
-        "wait_for_experiment_condition", "get_suggestion",
-        "list_trials", "get_success_trial_details", "get_job_logs",
-        "get_trial",
+        "optimize", "get_job", "list_jobs",
+        "delete_job", "get_best_results",
+        "wait_for_job_status", "get_job_logs",
+        "get_job_events",
     ],
-    "uncovered_methods": [
-        "tune()",              # requires Python callables
-        "get_trial_metrics()", # requires gRPC to DB Manager
-    ],
+    "uncovered_methods": [],  # all 8 OptimizerClient methods are covered
     "k8s_api_operations": [
+        "create_experiment_from_spec (CustomObjectsApi create)",
+        "create_hpo_experiment/early_stopping (CustomObjectsApi create)",
         "list_suggestions (CustomObjectsApi list)",
+        "get_suggestion (CustomObjectsApi get)",
         "update_experiment (CustomObjectsApi patch)",
-        "get_experiment_events (CoreV1Api list_namespaced_event)",
         "katib_pre_flight (ApiextensionsV1Api + CoreV1Api)",
     ],
 }
@@ -421,7 +428,7 @@ Pods may be deleted before log retrieval (`trialTemplate.retain=false`).
 **Mitigation**: Clear error suggesting `retain=true`. Tool checks trial status
 before attempting retrieval.
 
-### KatibClient Import Failure
+### OptimizerClient Import Failure
 
 **Mitigation**: Lazy import. `server.py` already catches `ImportError` for
 client modules.
@@ -438,19 +445,22 @@ when both modules are active.
 
 ### Unit Tests
 
-- Each tool in isolation with mocked `KatibClient`
+- Each tool in isolation with mocked `OptimizerClient`
 - SDK method calls, error handling, response schemas, two-phase confirmation,
   persona filtering, namespace enforcement
-- `V1beta1Experiment` construction in `create_hpo_experiment`
+- `optimize()` parameter construction in `create_hpo_experiment`; `V1beta1Experiment` construction for early stopping path
 - `update_experiment` patch generation
 - `katib_pre_flight` CRD/controller detection
 - Target: at least 80% line coverage for `optimizer/api/`
 
 ### SDK Contract Tests
 
-- Katib SDK methods exist with expected signatures
+- `OptimizerClient` methods exist with expected signatures
   (per `trainer/api/sdk_contracts_test.py` pattern)
-- `V1beta1Experiment`, `V1beta1ExperimentSpec` importable from `kubeflow.katib`
+- `OptimizerClient`, `OptimizationJob`, `Result`, `TrialConfig`, `Objective`,
+  `Search`, `RandomSearch`, `GridSearch` importable from `kubeflow.optimizer`
+- `V1beta1Experiment`, `V1beta1ExperimentSpec`, `V1beta1EarlyStoppingSpec`
+  importable from `kubeflow_katib_api.models`
 
 ### Integration Tests
 
@@ -478,7 +488,7 @@ when both modules are active.
 - [Katib Experiment CRD types](https://github.com/kubeflow/katib/blob/master/pkg/apis/controller/experiments/v1beta1/experiment_types.go)
 - [Katib Trial CRD types](https://github.com/kubeflow/katib/blob/master/pkg/apis/controller/trials/v1beta1/trial_types.go)
 - [Katib Suggestion CRD types](https://github.com/kubeflow/katib/blob/master/pkg/apis/controller/suggestions/v1beta1/suggestion_types.go)
-- [Katib Python SDK -- KatibClient](https://github.com/kubeflow/katib/blob/master/sdk/python/v1beta1/kubeflow/katib/api/katib_client.py)
+- [Kubeflow Optimizer SDK -- OptimizerClient](https://github.com/kubeflow/sdk/blob/main/sdk/kubeflow/optimizer/api/optimizer_client.py)
 - [kubeflow-mcp-server -- TrainerClient](https://github.com/kubeflow/mcp-server/tree/main/kubeflow_mcp/trainer)
 - [kubeflow-mcp-server -- Optimizer stub](https://github.com/kubeflow/mcp-server/tree/main/kubeflow_mcp/optimizer)
 - [kubeflow-mcp-server -- Persona policy](https://github.com/kubeflow/mcp-server/blob/main/kubeflow_mcp/core/policy.py)
