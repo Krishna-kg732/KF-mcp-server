@@ -2,9 +2,6 @@ name: Release
 
 on:
   workflow_dispatch:
-    branches:
-      - main
-      - 'release-*'
     inputs:
       version:
         description: 'Expected version (must match pyproject.toml and __init__.py)'
@@ -20,6 +17,10 @@ permissions:
 jobs:
   prepare:
     name: Prepare release
+    if: >-
+      github.event_name == 'release' ||
+      startsWith(github.ref, 'refs/heads/main') ||
+      startsWith(github.ref, 'refs/heads/release-')
     runs-on: ubuntu-latest
     outputs:
       artifact-name: ${{ steps.vars.outputs.artifact-name }}
