@@ -291,6 +291,8 @@ class TestResourceLoading:
 class TestPhaseToSection:
     def test_all_phases_mapped(self):
         for phase in TOOL_PHASES:
+            if phase.startswith("optimizer_"):
+                continue  # optimizer phases are mapped in the optimizer module
             assert phase in PHASE_TO_SECTION, f"Phase '{phase}' not in PHASE_TO_SECTION"
 
     def test_discovery_maps_to_none(self):
