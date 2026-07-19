@@ -617,11 +617,15 @@ class TestMCPToSDKConversions:
     )
     def test_make_train_func_detects_existing_train_calls(self, train_call):
         """Existing train() calls in module-level code should not be duplicated."""
-        script = textwrap.dedent("""
+        script = (
+            textwrap.dedent("""
                 import builtins
                 def train():
                     builtins._kubeflow_mcp_train_marker.append("ran")
-        """) + train_call + "\n"
+        """)
+            + train_call
+            + "\n"
+        )
         marker = self._run_wrapped_train(script)
 
         assert marker == ["ran"]
@@ -643,7 +647,10 @@ class TestMCPToSDKConversions:
 
     def test_make_train_func_raises_value_error_for_required_params(self):
         """train(required_param) with no func_args must raise a ValueError."""
-        with pytest.raises(ValueError, match=r"User-defined train\(\) requires parameters but no func_args were provided"):
+        with pytest.raises(
+            ValueError,
+            match=r"User-defined train\(\) requires parameters but no func_args were provided",
+        ):
             self._run_wrapped_train(
                 """
                     import builtins
@@ -667,7 +674,7 @@ class TestMCPToSDKConversions:
                     def train():
                         pass
                 """,
-                func_args={"lr": 0.01}
+                func_args={"lr": 0.01},
             )
 
     def test_make_train_func_adds_pass_for_empty_script(self):
@@ -969,3 +976,37 @@ class TestMCPToolSignatures:
         for p in mcp_lora_params:
             assert p in sig.parameters, f"MCP fine_tune missing LoRA param: {p}"
             assert p in lora_fields, f"SDK LoraConfig missing field: {p}"
+
+    def test_should_apply_hf_dataset_workaround(self):
+        """Workaround helper correctly detects top-level HuggingFace dataset URIs."""
+        from kubeflow_mcp.trainer.api.training import _should_apply_hf_dataset_workaround
+
+        assert _should_apply_hf_dataset_workaround("hf://org/ds") is True
+        assert _should_apply_hf_dataset_workaround("hf://org/ds/") is True
+        assert _should_apply_hf_dataset_workaround("hf://ds") is False
+        assert _should_apply_hf_dataset_workaround("hf://") is False
+        assert _should_apply_hf_dataset_workaround("hf://org/ds/subpath") is False
+        assert _should_apply_hf_dataset_workaround("s3://bucket/dataset") is False
+
+    def test_fine_tune_preview_includes_workaround_hint(self):
+        """confirmed=False preview path returns config without submitting the job."""
+        from unittest.mock import MagicMock, patch
+
+        from kubeflow_mcp.trainer.api.training import fine_tune
+
+        mock_client = MagicMock()
+
+        with (
+            patch("kubeflow_mcp.trainer.api.training._get_client", return_value=mock_client),
+            patch("kubeflow_mcp.trainer.api.training.check_namespace_allowed", return_value=None),
+        ):
+            resp = fine_tune(
+                model="hf://google/gemma-2b",
+                dataset="hf://tatsu-lab/alpaca",
+                confirmed=False,
+            )
+
+        # Preview should return config without actually creating a job.
+        assert "config" in resp
+        assert resp["config"]["mode"] == "builtin_trainer"
+        mock_client.create_job.assert_not_called()

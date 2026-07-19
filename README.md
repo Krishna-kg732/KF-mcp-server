@@ -1,6 +1,6 @@
 # Kubeflow MCP Server
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org) [![Join Slack](https://img.shields.io/badge/Join_Slack-blue?logo=slack)](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](https://www.python.org) [![Join Slack](https://img.shields.io/badge/Join_Slack-blue?logo=slack)](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels) [![Coverage Status](https://coveralls.io/repos/github/kubeflow/mcp-server/badge.svg?branch=main)](https://coveralls.io/github/kubeflow/mcp-server?branch=main) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/kubeflow/mcp-server)
 
 Proposal: [KEP-936](https://github.com/kubeflow/community/tree/master/proposals/936-kubeflow-mcp-server) · [ROADMAP](ROADMAP.md) · [SECURITY](SECURITY.md) · [CONTRIBUTING](CONTRIBUTING.md)
 
@@ -17,6 +17,10 @@ The Kubeflow MCP Server exposes Kubeflow Training operations as [Model Context P
 - **Multi-Platform**: Auto-detects OpenShift, EKS, GKE with platform-specific guidance
 - **Token-Efficient**: Progressive/semantic modes compress 23 tools into 2-3 meta-tools
 - **Extensible**: Plugin architecture for additional Kubeflow clients (TODO: optimizer, hub)
+
+## Demo
+
+[![Kubeflow MCP Server](https://img.youtube.com/vi/cZ2BP5hQjc8/0.jpg)](https://youtu.be/cZ2BP5hQjc8)
 
 ## Get Started
 
@@ -162,6 +166,7 @@ kubeflow-mcp serve \
   --instruction-tier full \       # full | compact | minimal
   --transport stdio \             # stdio | http | sse
   --auth-token SECRET \           # bearer token for HTTP auth (dev/staging)
+  --otel-endpoint URL \           # OTLP HTTP endpoint (optional tracing)
   --log-level INFO \              # DEBUG | INFO | WARNING | ERROR
   --log-format console \          # console | json (auto-detected if omitted)
   --no-banner                     # suppress startup banner
@@ -205,6 +210,26 @@ kubeflow-mcp agent \
 ```
 
 </details>
+
+## Observability
+
+OpenTelemetry tracing is optional and can be enabled without changing tool code.
+
+- Install optional dependencies: `pip install ".[otel]"`
+- Enable tracing with CLI flag or env var:
+
+```bash
+kubeflow-mcp serve --otel-endpoint http://localhost:4318
+# or
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+kubeflow-mcp serve
+```
+
+Each tool invocation emits a span with attributes:
+`tool.name`, `tool.args_preview`, `tool.success`, `tool.duration_ms`, `kubeflow.persona`, and `correlation_id`.
+
+> **Note:** `kubeflow-mcp agent --otel-endpoint ...` emits spans under a separate
+> `kubeflow-mcp-agent` service in Jaeger, distinct from the `kubeflow-mcp` server spans.
 
 ## Development
 
