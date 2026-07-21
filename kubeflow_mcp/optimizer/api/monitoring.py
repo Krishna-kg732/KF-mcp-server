@@ -27,15 +27,39 @@ import logging
 from typing import Any
 
 from kubeflow_mcp.common.constants import ErrorCode
-from kubeflow_mcp.common.types import ToolError
+from kubeflow_mcp.common.types import ToolError, ToolResponse, exception_details, is_k8s_not_found
+from kubeflow_mcp.common.utils import (
+    K8S_TIMEOUT,
+    get_custom_objects_api,
+    get_optimizer_client_for_namespace,
+    get_optimizer_effective_namespace,
+)
+from kubeflow_mcp.core.security import (
+    check_namespace_allowed,
+    truncate_log_output,
+    validate_k8s_name,
+)
+from kubeflow_mcp.optimizer.constants import (
+    KATIB_API_GROUP,
+    KATIB_API_VERSION,
+    OPTIMIZATION_JOB_COMPLETE,
+    OPTIMIZATION_JOB_FAILED,
+    SUGGESTION_PLURAL,
+)
+from kubeflow_mcp.optimizer.types import (
+    event_to_dict,
+    result_to_dict,
+    trial_counts,
+    trial_to_dict,
+)
+from kubeflow_mcp.trainer.api.monitoring import _extract_failure_hint
 
 logger = logging.getLogger(__name__)
 
-_NOT_IMPLEMENTED = ToolError(
-    error="Not yet implemented — planned for Phase 2",
-    error_code=ErrorCode.SDK_ERROR,
-    hint="This tool is registered but not yet implemented. See KEP-34.",
-).model_dump()
+MAX_LOG_LINES = 1000
+MAX_EVENT_LIMIT = 500
+MAX_WAIT_TIMEOUT = 3600
+MIN_POLLING_INTERVAL = 5
 
 
 def get_experiment_trials(
@@ -45,15 +69,48 @@ def get_experiment_trials(
 ) -> dict[str, Any]:
     """List trials for a Katib experiment with optional status filter.
 
+    Trials are read from ``OptimizerClient.get_job().trials``.
+
     Args:
         name: Experiment name.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
-        status: Optional status filter.
+        status: Optional status filter (e.g. Running, Complete, Failed).
 
     Returns:
         dict: Response containing list of trials with parameters, metrics, and status.
     """
-    return _NOT_IMPLEMENTED
+    name_err = validate_k8s_name(name)
+    if name_err is not None:
+        return name_err.model_dump()
+
+    ns_err = check_namespace_allowed(namespace)
+    if ns_err is not None:
+        return ns_err.model_dump()
+
+    try:
+        client = get_optimizer_client_for_namespace(namespace)
+        job = client.get_job(name=name)
+
+        trials = [trial_to_dict(t) for t in (getattr(job, "trials", None) or [])]
+        if status:
+            trials = [t for t in trials if t.get("status") == status]
+
+        data: dict[str, Any] = {"experiment": name, "trials": trials, "total": len(trials)}
+        data["summary"] = trial_counts(job)
+        return ToolResponse(data=data).model_dump()
+
+    except Exception as e:
+        if is_k8s_not_found(e):
+            return ToolError(
+                error=f"Experiment '{name}' not found",
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                hint="Use list_experiments() to find available experiments",
+            ).model_dump()
+        return ToolError(
+            error=str(e),
+            error_code=ErrorCode.SDK_ERROR,
+            details=exception_details(e),
+        ).model_dump()
 
 
 def get_best_trial(
@@ -69,9 +126,54 @@ def get_best_trial(
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
 
     Returns:
-        dict: Response containing best hyperparameters and metrics.
+        dict: Response containing best hyperparameters and metrics, or a note
+              when no successful trial exists yet.
     """
-    return _NOT_IMPLEMENTED
+    name_err = validate_k8s_name(name)
+    if name_err is not None:
+        return name_err.model_dump()
+
+    ns_err = check_namespace_allowed(namespace)
+    if ns_err is not None:
+        return ns_err.model_dump()
+
+    try:
+        client = get_optimizer_client_for_namespace(namespace)
+        result = client.get_best_results(name=name)
+
+        best = result_to_dict(result)
+        if best is None:
+            return ToolResponse(
+                data={
+                    "experiment": name,
+                    "best_trial": None,
+                    "message": "No optimal result available yet — no successful trials.",
+                }
+            ).model_dump()
+
+        return ToolResponse(
+            data={
+                "experiment": name,
+                "parameters": best["parameters"],
+                "metrics": best["metrics"],
+                "next_steps": [
+                    f"fine_tune(...) — retrain with these hyperparameters from '{name}'",
+                ],
+            }
+        ).model_dump()
+
+    except Exception as e:
+        if is_k8s_not_found(e):
+            return ToolError(
+                error=f"Experiment '{name}' not found",
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                hint="Use list_experiments() to find available experiments",
+            ).model_dump()
+        return ToolError(
+            error=str(e),
+            error_code=ErrorCode.SDK_ERROR,
+            details=exception_details(e),
+        ).model_dump()
 
 
 def get_suggestion(
@@ -80,16 +182,65 @@ def get_suggestion(
 ) -> dict[str, Any]:
     """Get suggestion algorithm status for an experiment.
 
-    Uses CustomObjectsApi directly (no SDK method available).
+    The Suggestion resource shares the experiment's name. Uses CustomObjectsApi
+    directly (no SDK method available).
 
     Args:
         name: Experiment name (suggestion shares the same name).
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
 
     Returns:
-        dict: Response containing algorithm name, status, and request/reply counts.
+        dict: Response containing algorithm name, status, and request counts.
     """
-    return _NOT_IMPLEMENTED
+    name_err = validate_k8s_name(name)
+    if name_err is not None:
+        return name_err.model_dump()
+
+    ns_err = check_namespace_allowed(namespace)
+    if ns_err is not None:
+        return ns_err.model_dump()
+
+    try:
+        ns = get_optimizer_effective_namespace(namespace)
+        api = get_custom_objects_api()
+        obj = api.get_namespaced_custom_object(
+            group=KATIB_API_GROUP,
+            version=KATIB_API_VERSION,
+            namespace=ns,
+            plural=SUGGESTION_PLURAL,
+            name=name,
+            _request_timeout=K8S_TIMEOUT,
+        )
+
+        spec = obj.get("spec", {})
+        status = obj.get("status", {})
+        algorithm = spec.get("algorithm", {})
+        conditions = status.get("conditions", []) or []
+        data = {
+            "name": name,
+            "namespace": ns,
+            "algorithm": algorithm.get("algorithmName"),
+            "requests": spec.get("requests"),
+            "suggestion_count": status.get("suggestionCount"),
+            "conditions": [
+                {"type": c.get("type"), "status": c.get("status"), "reason": c.get("reason")}
+                for c in conditions
+            ],
+        }
+        return ToolResponse(data=data).model_dump()
+
+    except Exception as e:
+        if is_k8s_not_found(e):
+            return ToolError(
+                error=f"Suggestion '{name}' not found",
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                hint="A Suggestion is created once an experiment starts running.",
+            ).model_dump()
+        return ToolError(
+            error=str(e),
+            error_code=ErrorCode.SDK_ERROR,
+            details=exception_details(e),
+        ).model_dump()
 
 
 def wait_for_experiment(
@@ -100,8 +251,8 @@ def wait_for_experiment(
 ) -> dict[str, Any]:
     """Block until experiment reaches terminal status (Complete/Failed).
 
-    Uses ``OptimizerClient.wait_for_job_status()``. Timeout is capped
-    at 3600 seconds and polling interval has a minimum of 5 seconds.
+    Uses ``OptimizerClient.wait_for_job_status()``. Timeout is capped at 3600
+    seconds and the polling interval has a minimum of 5 seconds.
 
     Args:
         name: Experiment name.
@@ -112,7 +263,64 @@ def wait_for_experiment(
     Returns:
         dict: Response containing final experiment status and trial summary.
     """
-    return _NOT_IMPLEMENTED
+    name_err = validate_k8s_name(name)
+    if name_err is not None:
+        return name_err.model_dump()
+
+    ns_err = check_namespace_allowed(namespace)
+    if ns_err is not None:
+        return ns_err.model_dump()
+
+    if timeout_seconds < 1:
+        return ToolError(
+            error=f"timeout_seconds must be >= 1, got {timeout_seconds}",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        ).model_dump()
+
+    timeout_seconds = min(timeout_seconds, MAX_WAIT_TIMEOUT)
+    polling_interval = max(polling_interval, MIN_POLLING_INTERVAL)
+
+    try:
+        client = get_optimizer_client_for_namespace(namespace)
+        job = client.wait_for_job_status(
+            name=name,
+            status={OPTIMIZATION_JOB_COMPLETE, OPTIMIZATION_JOB_FAILED},
+            timeout=timeout_seconds,
+            polling_interval=polling_interval,
+        )
+
+        final_status = getattr(job, "status", None) or "Unknown"
+        data: dict[str, Any] = {
+            "experiment": name,
+            "status": final_status,
+            "reached": True,
+            "message": f"Experiment reached '{final_status}'",
+        }
+        data.update(trial_counts(job))
+        return ToolResponse(data=data).model_dump()
+
+    except TimeoutError:
+        return ToolResponse(
+            data={
+                "experiment": name,
+                "status": "Unknown",
+                "reached": False,
+                "message": f"Timeout after {timeout_seconds}s",
+                "hint": "Use get_experiment_events() to check for scheduling issues",
+            }
+        ).model_dump()
+    except Exception as e:
+        if is_k8s_not_found(e):
+            return ToolError(
+                error=f"Experiment '{name}' not found",
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                hint="Use list_experiments() to find available experiments",
+            ).model_dump()
+        return ToolError(
+            error=str(e),
+            error_code=ErrorCode.SDK_ERROR,
+            details=exception_details(e),
+        ).model_dump()
 
 
 def get_experiment_trial_logs(
@@ -122,8 +330,8 @@ def get_experiment_trial_logs(
 ) -> dict[str, Any]:
     """Get pod logs from an experiment trial.
 
-    Uses ``OptimizerClient.get_job_logs()``. If no trial is specified,
-    logs from the current best trial are returned.
+    Uses ``OptimizerClient.get_job_logs()``. If no trial is specified, the SDK
+    returns logs from the current best trial.
 
     Args:
         name: Experiment name.
@@ -131,14 +339,67 @@ def get_experiment_trial_logs(
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
 
     Returns:
-        dict: Response containing ``logs``, ``trial`` name, and ``failure_patterns``.
+        dict: Response containing ``logs``, ``trial`` name, and ``failure_hint``.
+
+    Raises:
+        ToolError: If experiment not found (``RESOURCE_NOT_FOUND``).
     """
-    return _NOT_IMPLEMENTED
+    name_err = validate_k8s_name(name)
+    if name_err is not None:
+        return name_err.model_dump()
+    if trial is not None:
+        trial_err = validate_k8s_name(trial, "trial")
+        if trial_err is not None:
+            return trial_err.model_dump()
+
+    ns_err = check_namespace_allowed(namespace)
+    if ns_err is not None:
+        return ns_err.model_dump()
+
+    try:
+        client = get_optimizer_client_for_namespace(namespace)
+        log_lines = list(client.get_job_logs(name=name, trial_name=trial, follow=False))
+        if len(log_lines) > MAX_LOG_LINES:
+            log_lines = log_lines[-MAX_LOG_LINES:]
+
+        logs = "\n".join(log_lines)
+        sanitized = truncate_log_output(logs)
+
+        data: dict[str, Any] = {
+            "experiment": name,
+            "trial": trial,
+            "logs": sanitized,
+            "lines": len(sanitized.split("\n")) if sanitized else 0,
+        }
+
+        hint = _extract_failure_hint(logs)
+        if hint:
+            data["failure_hint"] = hint
+            data["next_steps"] = [
+                f"Detected {hint['category']}: {hint['suggestion']}",
+                f"Check get_experiment_events('{name}') for K8s-level issues",
+            ]
+
+        return ToolResponse(data=data).model_dump()
+
+    except Exception as e:
+        if is_k8s_not_found(e):
+            return ToolError(
+                error=f"Experiment '{name}' not found",
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                hint="Use list_experiments() to find available experiments",
+            ).model_dump()
+        return ToolError(
+            error=str(e),
+            error_code=ErrorCode.SDK_ERROR,
+            details=exception_details(e),
+        ).model_dump()
 
 
 def get_experiment_events(
     name: str,
     namespace: str | None = None,
+    limit: int = 50,
 ) -> dict[str, Any]:
     """Get K8s events for a Katib experiment.
 
@@ -147,8 +408,44 @@ def get_experiment_events(
     Args:
         name: Experiment name.
         namespace: K8s namespace. Uses default from kubeconfig when omitted.
+        limit: Maximum events to return. Defaults to 50.
 
     Returns:
         dict: Response containing list of events with type, reason, message, timestamp.
     """
-    return _NOT_IMPLEMENTED
+    name_err = validate_k8s_name(name)
+    if name_err is not None:
+        return name_err.model_dump()
+
+    ns_err = check_namespace_allowed(namespace)
+    if ns_err is not None:
+        return ns_err.model_dump()
+
+    if limit < 1:
+        return ToolError(
+            error=f"limit must be >= 1, got {limit}",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        ).model_dump()
+    limit = min(limit, MAX_EVENT_LIMIT)
+
+    try:
+        client = get_optimizer_client_for_namespace(namespace)
+        events = client.get_job_events(name=name)
+
+        event_list = [event_to_dict(e) for e in events[:limit]]
+        return ToolResponse(
+            data={"experiment": name, "events": event_list, "total": len(events)}
+        ).model_dump()
+
+    except Exception as e:
+        if is_k8s_not_found(e):
+            return ToolError(
+                error=f"Experiment '{name}' not found",
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                hint="Use list_experiments() to find available experiments",
+            ).model_dump()
+        return ToolError(
+            error=str(e),
+            error_code=ErrorCode.SDK_ERROR,
+            details=exception_details(e),
+        ).model_dump()

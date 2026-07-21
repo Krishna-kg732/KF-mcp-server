@@ -30,6 +30,10 @@ EXPERIMENT_PLURAL = sdk_constants.EXPERIMENT_PLURAL  # "experiments"
 TRIAL_PLURAL = sdk_constants.TRIAL_PLURAL  # "trials"
 EXPERIMENT_KIND = sdk_constants.EXPERIMENT_KIND  # "Experiment"
 
+# The SDK does not expose a Suggestion plural constant, so it is defined here.
+# Used for direct CustomObjectsApi access (list_suggestions, get_suggestion).
+SUGGESTION_PLURAL = "suggestions"
+
 # ─── OptimizationJob status values (from SDK) ──────────────────────────────
 
 OPTIMIZATION_JOB_CREATED = sdk_constants.OPTIMIZATION_JOB_CREATED
