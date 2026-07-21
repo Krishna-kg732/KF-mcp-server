@@ -172,8 +172,11 @@ class TestInstructionComposition:
 
     def test_section_order(self):
         sections = _sections_for_persona("platform-admin")
-        expected_order = ["planning", "monitoring", "training", "platform"]
-        assert sections == expected_order
+        # Trainer's canonical sections keep their order at the front. Other
+        # loaded client modules (e.g. optimizer) append their own sections
+        # afterwards, so assert the trainer prefix rather than exact equality.
+        trainer_sections = [s for s in sections if not s.startswith("optimizer_")]
+        assert trainer_sections == ["planning", "monitoring", "training", "platform"]
 
     @pytest.mark.parametrize(
         "test_case",
