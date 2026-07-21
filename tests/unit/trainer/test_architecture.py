@@ -172,7 +172,15 @@ class TestInstructionComposition:
 
     def test_section_order(self):
         sections = _sections_for_persona("platform-admin")
-        expected_order = ["planning", "monitoring", "training", "platform"]
+        expected_order = [
+            "planning",
+            "monitoring",
+            "training",
+            "platform",
+            "optimizer_planning",
+            "optimizer_optimization",
+            "optimizer_monitoring",
+        ]
         assert sections == expected_order
 
     @pytest.mark.parametrize(
