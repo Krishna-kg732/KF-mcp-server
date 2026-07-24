@@ -1543,7 +1543,6 @@ wheels = [
 
 [[package]]
 name = "kubeflow-mcp"
-version = "0.1.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -1600,7 +1599,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
 ]
-provides-extras = ["hub", "spark", "all"]
+provides-extras = ["all", "hub", "spark"]
 
 [package.metadata.requires-dev]
 dev = [
