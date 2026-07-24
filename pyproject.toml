@@ -1,5 +1,6 @@
 [project]
-name = "kubeflow-mcp"
+# DRY-RUN ONLY: renamed for a Test PyPI dry run under a fork-scoped project. Never merge this line.
+name = "kubeflow-mcp-krishna-kg732"
 dynamic = ["version"]
 requires-python = ">=3.10"
 description = "Model Context Protocol server for AI-assisted development with Kubeflow"

@@ -21,7 +21,9 @@ permissions:
 jobs:
   prepare:
     name: Prepare release branch
-    if: ${{ github.repository == 'kubeflow/mcp-server' && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release-') && github.actor == 'github-actions[bot]') }}
+    # DRY-RUN ONLY: fork slug added temporarily so this can be dispatched on
+    # Krishna-kg732/KF-mcp-server for a Test PyPI dry run. Never merge this line.
+    if: ${{ (github.repository == 'kubeflow/mcp-server' || github.repository == 'Krishna-kg732/KF-mcp-server') && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release-') && github.actor == 'github-actions[bot]') }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.vars.outputs.version }}
@@ -185,7 +187,8 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: test-pypi
-      url: https://test.pypi.org/project/kubeflow-mcp/
+      # DRY-RUN ONLY: points at the fork-scoped Test PyPI project. Never merge this line.
+      url: https://test.pypi.org/project/kubeflow-mcp-krishna-kg732/
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v7

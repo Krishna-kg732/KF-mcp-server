@@ -1542,7 +1542,7 @@ wheels = [
 ]
 
 [[package]]
-name = "kubeflow-mcp"
+name = "kubeflow-mcp-krishna-kg732"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
