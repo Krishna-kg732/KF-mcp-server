@@ -122,9 +122,17 @@ Use this to validate a build end-to-end without touching production. Running the
 workflow via **`workflow_dispatch`** builds the selected ref and publishes **only to Test
 PyPI** — it does not create a branch, tag, GitHub Release, or Docker image.
 
-1. Bump the version on a branch (`make release VERSION=X.Y.ZrcN` for an RC).
-2. Open GitHub Actions → `Release` → `Run workflow`, select the branch, and enter the
-   expected version string (validated against `kubeflow_mcp/__init__.py`).
+Dispatch is only allowed from `main` or an existing `release-X.Y` branch — the workflow
+rejects a dispatch from any other branch. (GitHub Actions ignores a `branches:` filter on
+`workflow_dispatch`, so this is enforced by an explicit check instead.) This means the RC
+bump must land on `main` (or `release-X.Y`) before you can dry run it — you cannot dispatch
+from a feature branch.
+
+1. Bump the version with `make release VERSION=X.Y.ZrcN` and merge it to `main` (or
+   `release-X.Y`).
+2. Open GitHub Actions → `Release` → `Run workflow`, select `main` (or the `release-X.Y`
+   branch), and enter the expected version string (validated against
+   `kubeflow_mcp/__init__.py`).
 3. Approve the `test-pypi` environment.
 4. Verify the upload:
 

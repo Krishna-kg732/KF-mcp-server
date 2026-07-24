@@ -28,6 +28,16 @@ jobs:
       branch: ${{ steps.vars.outputs.branch }}
       is-prerelease: ${{ steps.vars.outputs.is-prerelease }}
     steps:
+      # workflow_dispatch has no `branches:` filter (GitHub Actions ignores that
+      # key outside push/pull_request), so without this check any branch could be
+      # dispatched and published to Test PyPI. Fail fast, before checkout, so a
+      # disallowed dispatch gets a clear red X instead of a silent skip.
+      - name: Reject dispatch from non-release branches
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release-')
+        run: |
+          echo "ERROR: Test PyPI dry runs may only be dispatched from 'main' or 'release-*' (got '${GITHUB_REF_NAME}')." >&2
+          exit 1
+
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
