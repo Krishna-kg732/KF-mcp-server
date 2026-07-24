@@ -1,6 +1,6 @@
 [project]
 name = "kubeflow-mcp"
-version = "0.1.0-dev"
+dynamic = ["version"]
 requires-python = ">=3.10"
 description = "Model Context Protocol server for AI-assisted development with Kubeflow"
 readme = "README.md"
@@ -53,6 +53,9 @@ kubeflow-mcp = "kubeflow_mcp.cli:cli"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "kubeflow_mcp/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["kubeflow_mcp"]

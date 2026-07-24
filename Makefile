@@ -19,6 +19,16 @@ SHELL = /usr/bin/env bash -o pipefail
 
 PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
 
+# Setting SED for compatibility with macos
+ifeq ($(shell command -v gsed 2>/dev/null),)
+    SED ?= $(shell command -v sed)
+else
+    SED ?= $(shell command -v gsed)
+endif
+ifeq ($(shell ${SED} --version 2>&1 | grep -q GNU; echo $$?),1)
+    $(error !!! GNU sed is required. If on OS X, use 'brew install gnu-sed'.)
+endif
+
 help: ## Display this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
@@ -94,6 +104,34 @@ else
 	@echo ""
 	@npx @modelcontextprotocol/inspector --transport http --server-url $(or $(SERVER_URL),http://127.0.0.1:8000/mcp)
 endif
+
+##@ Release
+
+.PHONY: release
+release: install-dev ## Bump the version in kubeflow_mcp/__init__.py (VERSION=X.Y.Z[rcN])
+	@if [ -z "$(VERSION)" ] || ! echo "$(VERSION)" | grep -E -q '^[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?$$'; then \
+		echo "Error: VERSION must be set in X.Y.Z or X.Y.ZrcN format. Usage: make release VERSION=X.Y.Z[rcN]"; \
+		exit 1; \
+	fi
+	@$(SED) -i 's/^__version__ = ".*"/__version__ = "$(VERSION)"/' kubeflow_mcp/__init__.py
+	@echo "Version bumped to $(VERSION) in kubeflow_mcp/__init__.py"
+# NOTE: Changelog generation via git-cliff is temporarily disabled — changelog/git-cliff
+# support is being added to the repo separately. Re-enable the block below (plus the
+# git-cliff dev dependency in pyproject.toml and a cliff.toml) once that work lands.
+#	@if echo "$(VERSION)" | grep -E -q 'rc[0-9]+$$'; then \
+#		echo "Skipping changelog generation for RC release $(VERSION)"; \
+#	else \
+#		MAJOR_MINOR=$$(echo "$(VERSION)" | cut -d. -f1,2); \
+#		CHANGELOG_PATH="CHANGELOG/CHANGELOG-$$MAJOR_MINOR.md"; \
+#		echo "Generating changelog for $(VERSION) (unreleased)"; \
+#		CLIFF_CMD="uv run git-cliff --unreleased --tag $(VERSION)"; \
+#		if [ -f "$$CHANGELOG_PATH" ]; then \
+#			$$CLIFF_CMD --prepend "$$CHANGELOG_PATH"; \
+#		else \
+#			$$CLIFF_CMD -o "$$CHANGELOG_PATH"; \
+#		fi; \
+#		echo "Changelog generated at $$CHANGELOG_PATH"; \
+#	fi
 
 ##@ Cleanup
 
