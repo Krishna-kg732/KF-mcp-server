@@ -1,5 +1,6 @@
 [project]
-name = "kubeflow-mcp"
+# TEST-ONLY: fork-scoped Test PyPI project name for release validation. Never merge.
+name = "kubeflow-mcp-krishna-kg732"
 dynamic = ["version"]
 requires-python = ">=3.10"
 description = "Model Context Protocol server for AI-assisted development with Kubeflow"

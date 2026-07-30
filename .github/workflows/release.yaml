@@ -16,7 +16,8 @@ permissions:
 jobs:
   prepare:
     name: Prepare release branch
-    if: ${{ github.repository == 'kubeflow/mcp-server' && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release-') && github.actor == 'github-actions[bot]') }}
+    # TEST-ONLY: fork slug added so this can run on Krishna-kg732/KF-mcp-server. Never merge.
+    if: ${{ (github.repository == 'kubeflow/mcp-server' || github.repository == 'Krishna-kg732/KF-mcp-server') && !(github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release-') && github.actor == 'github-actions[bot]') }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.vars.outputs.version }}
@@ -165,9 +166,11 @@ jobs:
     name: Publish to PyPI
     needs: [prepare, build, create-tag]
     runs-on: ubuntu-latest
+    # TEST-ONLY: repointed at Test PyPI under a fork-scoped project so the release
+    # chain can run end to end on the fork. Never merge.
     environment:
-      name: release
-      url: https://pypi.org/project/kubeflow-mcp/
+      name: test-pypi
+      url: https://test.pypi.org/project/kubeflow-mcp-krishna-kg732/
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v7
@@ -177,6 +180,7 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          repository-url: https://test.pypi.org/legacy/
           verbose: true
 
   docker:
