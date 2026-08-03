@@ -222,7 +222,7 @@ Without auth configured, the server logs a warning that the HTTP endpoint is ope
 
 OpenTelemetry tracing is optional and can be enabled without changing tool code.
 
-- Install optional dependencies: `pip install ".[otel]"`
+- Install optional dependencies from source: `uv sync --group otel`
 - Enable tracing with CLI flag or env var:
 
 ```bash
