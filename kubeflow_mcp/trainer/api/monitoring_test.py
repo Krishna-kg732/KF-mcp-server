@@ -32,7 +32,7 @@ from kubeflow_mcp.trainer.api.monitoring import (
 )
 
 
-def testextract_failure_hint_openshift_pip_error():
+def test_extract_failure_hint_openshift_pip_error():
     # Test exact PermissionError trace
     logs = (
         "Installing collected packages: torch\n"
@@ -52,7 +52,7 @@ def testextract_failure_hint_openshift_pip_error():
     assert hint_generic["category"] == "OPENSHIFT_PIP_ERROR"
 
 
-def testextract_failure_hint_generic_permission_error():
+def test_extract_failure_hint_generic_permission_error():
     # Test a generic permission error does not trigger OpenShift pip error
     logs = "PermissionError: [Errno 13] Permission denied: '/workspace/data.csv'"
     hint = extract_failure_hint(logs)
@@ -142,7 +142,7 @@ def test_normal_log_not_matched():
     assert extract_failure_hint("Training completed successfully. Epoch 5/5 finished.") is None
 
 
-def testextract_failure_hint_suggestion_text():
+def test_extract_failure_hint_suggestion_text():
     cuda = extract_failure_hint("RuntimeError: CUDA error: device-side assert triggered")
     assert cuda is not None
     assert "GPU driver compatibility" in cuda["suggestion"]
