@@ -213,8 +213,8 @@ class TestInstructionComposition:
         assert SECTION_ORDER == ["planning", "monitoring", "training", "platform"]
 
     def test_sections_from_a_module_without_section_order_fall_back_sorted(self):
-        """A client exporting no SECTION_ORDER must still surface its sections,
-        in a deterministic (sorted) position rather than set iteration order."""
+        """Sections no client's SECTION_ORDER names must still surface, in a
+        deterministic (sorted) position rather than set iteration order."""
         from types import SimpleNamespace
         from unittest.mock import patch
 
@@ -222,12 +222,51 @@ class TestInstructionComposition:
         fake = SimpleNamespace(PHASE_TO_SECTION={"planning": "zeta", "discovery": "alpha"})
         with (
             patch("kubeflow_mcp.core.server.CLIENT_MODULES", {"fake": "fake_mod"}),
-            patch("importlib.import_module", return_value=fake),
+            patch("kubeflow_mcp.core.server.importlib.import_module", return_value=fake),
         ):
             sections = _sections_for_persona("platform-admin")
 
         assert sections == sorted(sections), f"fallback not deterministic: {sections}"
         assert sections == ["alpha", "zeta"]
+
+    def test_missing_section_order_keeps_canonical_ordering(self):
+        """A client that maps phases but forgets SECTION_ORDER must not have its
+        instructions silently reordered alphabetically."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        fake = SimpleNamespace(
+            PHASE_TO_SECTION={
+                "planning": "planning",
+                "monitoring": "monitoring",
+                "training": "training",
+                "platform": "platform",
+            }
+        )
+        with (
+            patch("kubeflow_mcp.core.server.CLIENT_MODULES", {"fake": "fake_mod"}),
+            patch("kubeflow_mcp.core.server.importlib.import_module", return_value=fake),
+        ):
+            sections = _sections_for_persona("platform-admin")
+
+        # Canonical order, not sorted() which would give monitoring/planning/...
+        assert sections == ["planning", "monitoring", "training", "platform"]
+
+    def test_sections_are_not_duplicated_across_clients(self):
+        """Two clients naming the same section must not yield it twice."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        shared = SimpleNamespace(
+            SECTION_ORDER=["planning"], PHASE_TO_SECTION={"planning": "planning"}
+        )
+        with (
+            patch("kubeflow_mcp.core.server.CLIENT_MODULES", {"a": "mod_a", "b": "mod_b"}),
+            patch("kubeflow_mcp.core.server.importlib.import_module", return_value=shared),
+        ):
+            sections = _sections_for_persona("platform-admin")
+
+        assert sections == ["planning"], f"duplicate section returned: {sections}"
 
     @pytest.mark.parametrize(
         "test_case",
