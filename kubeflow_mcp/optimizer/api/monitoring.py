@@ -263,6 +263,16 @@ def wait_for_experiment(
         ).model_dump()
 
     timeout_seconds = min(timeout_seconds, MAX_WAIT_TIMEOUT)
+    # The SDK raises ValueError for this since 0.5.0; reject it here so it is a
+    # validation error rather than an opaque SDK failure, matching wait_for_training.
+    if polling_interval >= timeout_seconds:
+        return ToolError(
+            error=(
+                "polling_interval must be strictly less than timeout_seconds, got "
+                f"polling_interval={polling_interval}, timeout_seconds={timeout_seconds}"
+            ),
+            error_code=ErrorCode.VALIDATION_ERROR,
+        ).model_dump()
 
     try:
         client = get_optimizer_client_for_namespace(namespace)

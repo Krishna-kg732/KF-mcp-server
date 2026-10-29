@@ -17,6 +17,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from kubernetes.client.exceptions import ApiException
 
 from kubeflow_mcp.optimizer.api import monitoring
@@ -199,9 +200,29 @@ def test_wait_for_experiment_timeout():
     client = MagicMock()
     client.wait_for_job_status.side_effect = TimeoutError()
     with patch(f"{_MON}.get_optimizer_client_for_namespace", return_value=client):
-        result = monitoring.wait_for_experiment("exp-1", timeout_seconds=5)
+        result = monitoring.wait_for_experiment("exp-1", timeout_seconds=30)
     assert result["success"] is True
     assert result["data"]["reached"] is False
+
+
+@pytest.mark.parametrize(
+    ("timeout_seconds", "polling_interval"),
+    [
+        (15, 15),  # equal: the SDK requires strictly less
+        (10, 15),  # the default interval against a short timeout
+        (99999, 5000),  # compared after the timeout is capped
+    ],
+)
+def test_wait_for_experiment_rejects_interval_not_below_timeout(timeout_seconds, polling_interval):
+    """SDK 0.5 raises ValueError here; it must surface as a validation error."""
+    client = MagicMock()
+    with patch(f"{_MON}.get_optimizer_client_for_namespace", return_value=client):
+        result = monitoring.wait_for_experiment(
+            "exp-1", timeout_seconds=timeout_seconds, polling_interval=polling_interval
+        )
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert "strictly less" in result["error"]
+    client.wait_for_job_status.assert_not_called()
 
 
 def test_wait_for_experiment_invalid_timeout():
