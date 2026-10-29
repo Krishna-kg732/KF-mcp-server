@@ -87,7 +87,7 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "get_training_events",
             "health_check",
             "get_server_logs",
-            # Optimizer (read-only — 13 tools: planning + discovery + monitoring)
+            # Optimizer (12 read-only tools: planning, discovery and monitoring)
             "katib_pre_flight",
             "list_experiments",
             "get_experiment",
@@ -98,7 +98,6 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "get_experiment_trials",
             "get_best_trial",
             "get_suggestion",
-            "wait_for_experiment",
             "get_experiment_trial_logs",
             "get_experiment_events",
         ]
@@ -113,6 +112,9 @@ PERSONAS: dict[str, dict[str, Any]] = {
             "delete_training_job",
             # Optimizer
             "create_hpo_experiment",
+            # Waiting holds the MCP connection open, so like wait_for_training
+            # it is granted to the persona that submits experiments.
+            "wait_for_experiment",
             "delete_experiment",
         ],
     },

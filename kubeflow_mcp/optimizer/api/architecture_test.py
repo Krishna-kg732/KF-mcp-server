@@ -208,8 +208,8 @@ class TestPersonaIntegration:
             tools |= self._resolve_persona_tools(config["inherit"])
         return tools
 
-    def test_readonly_has_13_optimizer_tools(self):
-        """KEP-34: readonly gets all 13 read-only optimizer tools."""
+    def test_readonly_has_12_optimizer_tools(self):
+        """readonly gets every read-only optimizer tool except wait_for_experiment."""
         readonly_tools = self._resolve_persona_tools("readonly")
         optimizer_readonly = {
             "katib_pre_flight",
@@ -222,13 +222,19 @@ class TestPersonaIntegration:
             "get_experiment_trials",
             "get_best_trial",
             "get_suggestion",
-            "wait_for_experiment",
             "get_experiment_trial_logs",
             "get_experiment_events",
         }
         assert optimizer_readonly <= readonly_tools, (
             f"Missing from readonly: {optimizer_readonly - readonly_tools}"
         )
+
+    def test_wait_tools_share_a_persona(self):
+        """wait_for_experiment is granted exactly where wait_for_training is."""
+        for persona in ("readonly", "data-scientist", "ml-engineer"):
+            tools = self._resolve_persona_tools(persona)
+            assert ("wait_for_experiment" in tools) == ("wait_for_training" in tools), persona
+        assert "wait_for_experiment" not in self._resolve_persona_tools("readonly")
 
     def test_data_scientist_has_create_and_delete(self):
         """KEP-34: data-scientist adds create_hpo_experiment + delete_experiment."""
