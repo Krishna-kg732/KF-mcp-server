@@ -221,3 +221,27 @@ def test_every_tool_enforces_the_allowlist(tool, kwargs):
     assert result["error_code"] == "PERMISSION_DENIED", f"{tool.__name__} wrong error"
     client.assert_not_called()
     api.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("tool", "kwargs"),
+    [
+        pytest.param(tool, _TOOL_KWARGS[tool.__name__], id=tool.__name__)
+        for module in (discovery, monitoring, lifecycle, optimization)
+        for tool in vars(module).values()
+        if callable(tool) and getattr(tool, "__name__", None) in _TOOL_KWARGS
+    ],
+)
+def test_malformed_namespace_is_rejected_before_any_api_request(tool, kwargs):
+    """Mirrors the trainer sweep: a malformed namespace never reaches the API."""
+    with (
+        patch(_POLICY, return_value=None),
+        patch("kubernetes.config.load_kube_config"),
+        patch("kubernetes.config.load_incluster_config"),
+        patch("kubernetes.client.ApiClient.call_api") as call_api,
+    ):
+        result = tool(**kwargs, namespace="Bad_NS!")
+
+    assert result["error_code"] == "VALIDATION_ERROR", result
+    assert "namespace" in result["error"]
+    call_api.assert_not_called()

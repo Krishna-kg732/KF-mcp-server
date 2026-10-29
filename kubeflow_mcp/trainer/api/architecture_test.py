@@ -126,6 +126,27 @@ def test_malformed_namespace_is_rejected_before_any_api_request(tool):
     call_api.assert_not_called()
 
 
+def test_no_tool_name_is_exported_by_two_clients():
+    """Every client shares one flat MCP tool namespace.
+
+    FastMCP's default on a duplicate name is to log a warning and replace the
+    earlier tool, so a clash (a pipelines client's ``list_experiments`` next to
+    the optimizer's, say) would silently shadow a tool instead of failing.
+    """
+    import importlib
+    from collections import defaultdict
+
+    from kubeflow_mcp.core.server import CLIENT_MODULES
+
+    owners: dict[str, list[str]] = defaultdict(list)
+    for client, path in CLIENT_MODULES.items():
+        for tool in getattr(importlib.import_module(path), "TOOLS", []):
+            owners[tool.__name__].append(client)
+
+    clashes = {name: clients for name, clients in owners.items() if len(clients) > 1}
+    assert not clashes, f"tool names exported by more than one client: {clashes}"
+
+
 # ─── Persona gating ────────────────────────────────────────────────────────
 
 
