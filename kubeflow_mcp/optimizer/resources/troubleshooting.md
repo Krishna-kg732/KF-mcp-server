@@ -69,15 +69,25 @@ not yet recorded an optimal trial. Check in order:
 If trials complete but no metrics are recorded, the metrics collector is not
 seeing the output — verify the metric name and the primary container.
 
-## Suspend and resume
+## Adjusting a running experiment
 
-`update_experiment(name, action="suspend")` sets `parallelTrialCount` to 0;
-running trials finish, no new ones start. The previous value is saved to the
-`kubeflow-mcp/pre-suspend-parallel-trial-count` annotation and restored on
-`action="resume"`. Suspending an already-suspended experiment is a no-op.
+Katib has no pause. Its admission webhook rejects `parallelTrialCount` of 0 and
+only lets a live experiment change three fields, which is what
+`update_experiment` exposes:
 
-If someone edits `parallelTrialCount` by hand while suspended, resume restores
-the **annotated** value, not the hand-edited one.
+| Parameter | Use |
+|---|---|
+| `parallel_trial_count` | Throttle to `1` to free resources, or raise it to go faster |
+| `max_trial_count` | Extend the budget. Must exceed the trials already created |
+| `max_failed_trial_count` | Tolerate more (or fewer) failures before the experiment fails |
+
+The tool previews the change first (`confirmed=False`) and refuses edits Katib
+would reject: concurrency above the budget, a budget at or below the trials
+already created, or changes to a finished experiment. A finished experiment can
+only be extended when it stopped at `max_trial_count` and was created with
+`resumePolicy: LongRunning` or `FromVolume` (the default is `Never`), which
+needs `create_experiment_from_spec`. To stop an experiment for good, use
+`delete_experiment`.
 
 ## Cleanup
 

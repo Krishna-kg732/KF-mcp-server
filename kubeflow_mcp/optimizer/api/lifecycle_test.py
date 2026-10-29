@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for optimizer lifecycle tools (confirmation, ownership, suspend/resume)."""
+"""Unit tests for optimizer lifecycle tools (confirmation, ownership, budget edits)."""
 
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
@@ -54,11 +54,20 @@ def cluster(api: MagicMock | None = None, persona="platform-admin", managed=True
         yield api, client
 
 
-def _experiment(parallel=4, annotations=None):
+def _experiment(parallel=3, max_trials=12, max_failed=None, trials=4, conditions=(), **spec):
+    """An Experiment CR as the API returns it, with Katib's defaults applied."""
+    body = {"parallelTrialCount": parallel, "maxTrialCount": max_trials, **spec}
+    if max_failed is not None:
+        body["maxFailedTrialCount"] = max_failed
     return {
-        "metadata": {"annotations": annotations or {}},
-        "spec": {"parallelTrialCount": parallel},
+        "metadata": {"name": "demo"},
+        "spec": body,
+        "status": {"trials": trials, "conditions": list(conditions)},
     }
+
+
+def _succeeded(reason):
+    return {"type": "Succeeded", "status": "True", "reason": reason}
 
 
 # ─── delete_experiment ─────────────────────────────────────────────────────
@@ -129,7 +138,7 @@ def test_ownership_check_failure_is_reported():
     ("call", "attr"),
     [
         (lambda: lc.delete_experiment("typo", confirmed=True), "delete_job"),
-        (lambda: lc.update_experiment("typo", "suspend"), "delete_job"),
+        (lambda: lc.update_experiment("typo", parallel_trial_count=1), "delete_job"),
     ],
 )
 def test_missing_experiment_reports_not_found_not_ownership(call, attr):
@@ -143,96 +152,151 @@ def test_missing_experiment_reports_not_found_not_ownership(call, attr):
     getattr(client, attr).assert_not_called()
 
 
-# ─── update_experiment: suspend / resume ───────────────────────────────────
+# ─── update_experiment: budget and concurrency edits ───────────────────────
 
 
-def test_suspend_zeroes_parallelism_and_stashes_previous():
-    api = MagicMock()
-    api.get_namespaced_custom_object.return_value = _experiment(parallel=4)
+def _update(api, **kwargs):
     with cluster(api):
-        result = lc.update_experiment("demo", "suspend")
-
-    assert result["data"]["parallel_trial_count"] == 0
-    body = api.patch_namespaced_custom_object.call_args.kwargs["body"]
-    assert body["spec"]["parallelTrialCount"] == 0
-    assert body["metadata"]["annotations"][lc.PARALLELISM_ANNOTATION] == "4"
-    # KEP text also mentions resumePolicy; we deliberately do not touch it.
-    assert "resumePolicy" not in body["spec"]
+        return lc.update_experiment("demo", **kwargs)
 
 
-def test_resume_restores_stashed_parallelism_and_clears_annotation():
+def _api(**experiment):
     api = MagicMock()
-    api.get_namespaced_custom_object.return_value = _experiment(
-        parallel=0, annotations={lc.PARALLELISM_ANNOTATION: "4"}
-    )
-    with cluster(api):
-        result = lc.update_experiment("demo", "resume")
-
-    assert result["data"]["parallel_trial_count"] == 4
-    body = api.patch_namespaced_custom_object.call_args.kwargs["body"]
-    assert body["spec"]["parallelTrialCount"] == 4
-    assert body["metadata"]["annotations"][lc.PARALLELISM_ANNOTATION] is None
+    api.get_namespaced_custom_object.return_value = _experiment(**experiment)
+    return api
 
 
-def test_resume_without_stash_falls_back_to_default():
-    api = MagicMock()
-    api.get_namespaced_custom_object.return_value = _experiment(parallel=0)
-    with cluster(api):
-        result = lc.update_experiment("demo", "resume")
-    assert result["data"]["parallel_trial_count"] == lc.DEFAULT_PARALLELISM
-
-
-def test_resume_never_restores_zero():
-    """A corrupt stash of '0' would silently leave the experiment paused."""
-    api = MagicMock()
-    api.get_namespaced_custom_object.return_value = _experiment(
-        parallel=0, annotations={lc.PARALLELISM_ANNOTATION: "0"}
-    )
-    with cluster(api):
-        result = lc.update_experiment("demo", "resume")
-    assert result["data"]["parallel_trial_count"] >= lc.DEFAULT_PARALLELISM
-
-
-def test_suspend_is_idempotent():
-    api = MagicMock()
-    api.get_namespaced_custom_object.return_value = _experiment(parallel=0)
-    with cluster(api):
-        result = lc.update_experiment("demo", "suspend")
-    assert result["success"] is True
-    assert "already suspended" in result["data"]["message"]
+def test_update_preview_shows_the_change_and_does_not_patch():
+    api = _api(parallel=3)
+    result = _update(api, parallel_trial_count=1)
+    assert result["status"] == "preview"
+    assert result["config"]["changes"] == {"parallel_trial_count": {"from": 3, "to": 1}}
+    assert "parallel_trial_count 3 -> 1" in result["message"]
     api.patch_namespaced_custom_object.assert_not_called()
 
 
-def test_suspend_resume_round_trip_preserves_concurrency():
+def test_update_confirmed_patches_only_changed_spec_fields():
+    api = _api(parallel=3, max_trials=12)
+    result = _update(api, parallel_trial_count=1, max_trial_count=12, confirmed=True)
+    assert result["success"] is True
+    assert result["data"]["changes"] == {"parallel_trial_count": {"from": 3, "to": 1}}
+    kwargs = api.patch_namespaced_custom_object.call_args.kwargs
+    # Nothing else is touched: no annotations, no resumePolicy.
+    assert kwargs["body"] == {"spec": {"parallelTrialCount": 1}}
+    assert kwargs["_request_timeout"] == mcp_utils.K8S_WRITE_TIMEOUT
+
+
+def test_update_with_current_values_is_a_no_op():
+    api = _api(parallel=3)
+    result = _update(api, parallel_trial_count=3, confirmed=True)
+    assert result["success"] is True
+    assert result["data"]["changes"] == {}
+    api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_update_requires_at_least_one_field():
     api = MagicMock()
-    api.get_namespaced_custom_object.return_value = _experiment(parallel=7)
-    with cluster(api):
-        lc.update_experiment("demo", "suspend")
-        stashed = api.patch_namespaced_custom_object.call_args.kwargs["body"]["metadata"][
-            "annotations"
-        ]
-        api.get_namespaced_custom_object.return_value = _experiment(parallel=0, annotations=stashed)
-        result = lc.update_experiment("demo", "resume")
-    assert result["data"]["parallel_trial_count"] == 7
-
-
-@pytest.mark.parametrize("action", ["pause", "", "SUSPEND"])
-def test_invalid_action_rejected(action):
-    result = lc.update_experiment("demo", action)
+    result = _update(api)
     assert result["error_code"] == "VALIDATION_ERROR"
+    api.get_namespaced_custom_object.assert_not_called()
+
+
+def test_zero_parallelism_is_rejected_with_a_pause_hint():
+    """Katib's webhook rejects parallelTrialCount <= 0, so this cannot pause."""
+    api = MagicMock()
+    result = _update(api, parallel_trial_count=0)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert "cannot pause" in result["hint"]
+    api.get_namespaced_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"parallel_trial_count": -1},
+        {"parallel_trial_count": 101},
+        {"parallel_trial_count": True},
+        {"max_trial_count": 0},
+        {"max_trial_count": 1001},
+        {"max_trial_count": "20"},
+        {"max_failed_trial_count": -1},
+    ],
+)
+def test_out_of_range_values_are_rejected_before_any_call(kwargs):
+    api = MagicMock()
+    result = _update(api, **kwargs)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    api.get_namespaced_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("experiment", "kwargs", "message"),
+    [
+        ({"max_trials": 5}, {"parallel_trial_count": 6}, "must not exceed max_trial_count"),
+        ({"parallel": 4}, {"max_trial_count": 3, "parallel_trial_count": 4}, "must not exceed"),
+        ({"max_trials": 10}, {"max_failed_trial_count": 11}, "max_failed_trial_count (11)"),
+        ({"trials": 8}, {"max_trial_count": 8}, "greater than the 8 trials"),
+        # Any spec edit is refused once every budgeted trial exists.
+        ({"trials": 12, "max_trials": 12}, {"parallel_trial_count": 1}, "greater than"),
+    ],
+)
+def test_edits_katib_would_reject_are_refused(experiment, kwargs, message):
+    api = _api(**experiment)
+    result = _update(api, confirmed=True, **kwargs)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert message in result["error"]
+    api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_raising_the_budget_above_created_trials_is_allowed():
+    api = _api(trials=8, max_trials=8, parallel=2)
+    result = _update(api, max_trial_count=20)
+    assert result["status"] == "preview"
+
+
+@pytest.mark.parametrize(
+    ("conditions", "spec"),
+    [
+        ([_succeeded("ExperimentGoalReached")], {"resumePolicy": "LongRunning"}),
+        ([_succeeded("ExperimentMaxTrialsReached")], {"resumePolicy": "Never"}),
+        ([_succeeded("ExperimentMaxTrialsReached")], {}),  # defaulted to Never
+        ([{"type": "Failed", "status": "True", "reason": "ExperimentFailed"}], {}),
+    ],
+)
+def test_finished_experiment_that_katib_cannot_restart_is_refused(conditions, spec):
+    api = _api(trials=12, max_trials=12, conditions=conditions, **spec)
+    result = _update(api, max_trial_count=20, confirmed=True)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert "has finished" in result["error"]
+    api.patch_namespaced_custom_object.assert_not_called()
+
+
+@pytest.mark.parametrize("policy", ["LongRunning", "FromVolume"])
+def test_finished_experiment_with_a_restartable_policy_can_be_extended(policy):
+    api = _api(
+        trials=12,
+        max_trials=12,
+        conditions=[_succeeded("ExperimentMaxTrialsReached")],
+        resumePolicy=policy,
+    )
+    result = _update(api, max_trial_count=20, confirmed=True)
+    assert result["success"] is True
+    body = api.patch_namespaced_custom_object.call_args.kwargs["body"]
+    assert body == {"spec": {"maxTrialCount": 20}}
 
 
 def test_update_not_found():
     api = MagicMock()
     api.get_namespaced_custom_object.side_effect = _not_found()
     with cluster(api):
-        result = lc.update_experiment("missing", "suspend")
+        result = lc.update_experiment("missing", parallel_trial_count=1)
     assert result["error_code"] == "RESOURCE_NOT_FOUND"
 
 
 def test_non_admin_blocked_from_updating_external_experiment():
     api = MagicMock()
     with cluster(api, persona="ml-engineer", managed=False):
-        result = lc.update_experiment("external", "suspend")
+        result = lc.update_experiment("external", parallel_trial_count=1, confirmed=True)
     assert result["success"] is False
+    assert "update experiments created through MCP" in result["hint"]
     api.patch_namespaced_custom_object.assert_not_called()

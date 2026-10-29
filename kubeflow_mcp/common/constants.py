@@ -224,7 +224,7 @@ TOOL_NEXT_HINTS: dict[str, str] = {
     "create_hpo_experiment": "Monitor with get_experiment_status() or wait_for_experiment()",
     "create_experiment_from_spec": "Monitor with get_experiment_status() or wait_for_experiment()",
     "delete_experiment": "Resubmit with create_hpo_experiment() if needed",
-    "update_experiment": "Check get_experiment_status(name) to verify new status",
+    "update_experiment": "Check get_experiment(name) to confirm the new trial settings",
 }
 
 

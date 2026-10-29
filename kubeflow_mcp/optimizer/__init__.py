@@ -132,7 +132,11 @@ CLIENT_TOOL_DESCRIPTIONS: dict[str, str] = {
     "delete_experiment": (
         "[DESTRUCTIVE] Delete experiment permanently. Set confirmed=True to execute."
     ),
-    "update_experiment": ("Suspend or resume experiment. Pass action='suspend' or 'resume'."),
+    "update_experiment": (
+        "Change a running experiment's parallel_trial_count, max_trial_count or "
+        "max_failed_trial_count. Katib cannot pause; use parallel_trial_count=1 to "
+        "throttle. Set confirmed=True to apply."
+    ),
 }
 
 CLIENT_TOOL_ANNOTATIONS: dict[str, dict] = {
@@ -270,7 +274,7 @@ CLIENT_TOOL_ANNOTATIONS: dict[str, dict] = {
         "destructiveHint": False,
         "idempotentHint": True,
         "openWorldHint": True,
-        "tags": ["lifecycle", "suspend", "resume"],
+        "tags": ["lifecycle", "scale", "budget"],
     },
 }
 
@@ -330,7 +334,8 @@ OPTIMIZER MONITORING AND LIFECYCLE:
 - wait_for_experiment(name) → block until Complete/Failed (timeout capped at 3600s)
 - get_suggestion(name) → algorithm status and request/reply counts
 - delete_experiment(name, confirmed=True) → remove permanently (preview first)
-- update_experiment(name, action="suspend"|"resume") → pause/resume experiment""",
+- update_experiment(name, parallel_trial_count=1, confirmed=True) → throttle, or raise
+  max_trial_count to extend (Katib cannot pause; preview first)""",
     },
     "optimizer_optimization": {
         "full": """\

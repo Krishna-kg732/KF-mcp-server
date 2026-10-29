@@ -151,7 +151,7 @@ _TOOL_KWARGS: dict[str, dict] = {
     "get_experiment_trial_logs": {"name": "exp"},
     "get_experiment_events": {"name": "exp"},
     "delete_experiment": {"name": "exp", "confirmed": True},
-    "update_experiment": {"name": "exp", "action": "suspend"},
+    "update_experiment": {"name": "exp", "parallel_trial_count": 1, "confirmed": True},
     "create_hpo_experiment": {
         "name": "exp",
         "objective_metric": "acc",
