@@ -88,6 +88,44 @@ def test_no_allowlist_permits_everything():
         assert check_optimizer_namespace("anything") is None
 
 
+def test_spec_namespace_cannot_bypass_the_allowlist():
+    """create_experiment_from_spec must check spec.metadata.namespace, not the
+    default, when no namespace argument is given."""
+    api = MagicMock()
+    spec = {"metadata": {"name": "exp", "namespace": "team-b"}}
+    with (
+        patch(_POLICY, return_value=["team-a"]),
+        patch(_OPTIMIZER_NS, side_effect=lambda ns: ns or "team-a"),
+        patch("kubeflow_mcp.common.utils.get_custom_objects_api", return_value=api),
+    ):
+        result = optimization.create_experiment_from_spec(spec=spec, confirmed=True)
+
+    assert result["success"] is False
+    assert result["error_code"] == "PERMISSION_DENIED"
+    assert "team-b" in result["error"]
+    api.assert_not_called()
+
+
+def test_namespace_argument_overrides_the_spec_namespace():
+    spec = {"metadata": {"name": "exp", "namespace": "team-b"}}
+    with (
+        patch(_POLICY, return_value=["team-a"]),
+        patch(_OPTIMIZER_NS, side_effect=lambda ns: ns or "team-a"),
+    ):
+        result = optimization.create_experiment_from_spec(spec=spec, namespace="team-a")
+
+    assert result["status"] == "preview"
+    assert result["config"]["metadata"]["namespace"] == "team-a"
+
+
+def test_non_string_spec_namespace_is_rejected():
+    spec = {"metadata": {"name": "exp", "namespace": 7}}
+    with patch(_POLICY, return_value=None):
+        result = optimization.create_experiment_from_spec(spec=spec)
+
+    assert result["error_code"] == "VALIDATION_ERROR"
+
+
 def test_generic_helper_still_defaults_to_trainer():
     """Trainer callers must keep their existing behaviour."""
     with (

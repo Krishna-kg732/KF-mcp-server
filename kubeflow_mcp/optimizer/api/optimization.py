@@ -421,7 +421,16 @@ def create_experiment_from_spec(
     if name_err is not None:
         return name_err.model_dump()
 
-    ns_err = check_optimizer_namespace(namespace)
+    # Check the namespace the experiment will actually be created in. The spec
+    # can name its own, so checking only the argument would let
+    # spec.metadata.namespace bypass the allowlist.
+    target_namespace = namespace or (spec.get("metadata") or {}).get("namespace")
+    if target_namespace is not None and not isinstance(target_namespace, str):
+        return ToolError(
+            error="spec.metadata.namespace must be a string",
+            error_code=ErrorCode.VALIDATION_ERROR,
+        ).model_dump()
+    ns_err = check_optimizer_namespace(target_namespace)
     if ns_err is not None:
         return ns_err.model_dump()
 
@@ -439,9 +448,7 @@ def create_experiment_from_spec(
             error_code=ErrorCode.VALIDATION_ERROR,
         ).model_dump()
 
-    ns = mcp_utils.get_optimizer_effective_namespace(
-        namespace or (spec.get("metadata") or {}).get("namespace")
-    )
+    ns = mcp_utils.get_optimizer_effective_namespace(target_namespace)
 
     body = experiment.to_dict()
     metadata = body.setdefault("metadata", {})
