@@ -416,3 +416,97 @@ def test_from_spec_explicit_namespace_wins():
                 spec=_manifest(namespace="in-spec"), namespace="explicit"
             )
     assert result["config"]["metadata"]["namespace"] == "explicit"
+
+
+# ─── Trial image validation ─────────────────────────────────────────────────
+
+
+def _trainjob(image):
+    return {**TRIAL_TEMPLATE, "spec": {**TRIAL_TEMPLATE["spec"], "trainer": {"image": image}}}
+
+
+def _job(image, init_image="busybox:1.36"):
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "spec": {
+            "template": {
+                "spec": {
+                    "initContainers": [{"name": "setup", "image": init_image}],
+                    "containers": [{"name": "train", "image": image}],
+                }
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("template", "field"),
+    [
+        (_trainjob("My/Trainer:1"), "trial_template.spec.trainer.image"),
+        (_trainjob("my trainer:1"), "trial_template.spec.trainer.image"),
+        (_job("bad//image"), "trial_template.spec.template.spec.containers[0].image"),
+        (_job("ok:1", init_image=""), "trial_template.spec.template.spec.initContainers[0].image"),
+        (
+            {"kind": "Pod", "spec": {"containers": [{"name": "c", "image": "img@sha256:short"}]}},
+            "trial_template.spec.containers[0].image",
+        ),
+    ],
+)
+def test_malformed_trial_image_is_rejected_before_any_call(template, field):
+    with cluster() as api:
+        result = _create(trial_template=template, confirmed=True)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert result["error"].startswith(field)
+    api.create_namespaced_custom_object.assert_not_called()
+
+
+def test_trial_image_rejected_before_namespace_policy():
+    """Input validation runs before the namespace check (mutation-safety order)."""
+    with patch("kubeflow_mcp.optimizer.api.optimization.check_optimizer_namespace") as ns_check:
+        result = _create(trial_template=_trainjob("Bad Image"))
+    assert result["error_code"] == "VALIDATION_ERROR"
+    ns_check.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        "my/trainer:${trialParameters.tag}",
+        "${trialParameters.image}",
+        "registry.example.com:5000/team/trainer:v2",
+        "localhost:5000/a/b@sha256:" + "a" * 64,
+    ],
+)
+def test_valid_or_templated_trial_image_is_accepted(image):
+    with cluster():
+        result = _create(trial_template=_trainjob(image))
+    assert result["status"] == "preview"
+
+
+def test_rejected_image_reports_the_original_value():
+    with cluster():
+        result = _create(trial_template=_trainjob("Bad/${trialParameters.tag}"))
+    assert result["details"] == {"value": "Bad/${trialParameters.tag}"}
+
+
+def test_from_spec_rejects_a_malformed_trial_image():
+    manifest = _manifest()
+    manifest["spec"]["trialTemplate"] = {"trialSpec": _job("UPPER/case:1")}
+    with cluster() as api:
+        result = opt.create_experiment_from_spec(spec=manifest, confirmed=True)
+    assert result["error_code"] == "VALIDATION_ERROR"
+    assert result["error"].startswith(
+        "spec.spec.trialTemplate.trialSpec.spec.template.spec.containers[0].image"
+    )
+    api.create_namespaced_custom_object.assert_not_called()
+
+
+def test_from_spec_configmap_template_skips_image_check():
+    manifest = _manifest()
+    manifest["spec"]["trialTemplate"] = {
+        "configMap": {"configMapName": "tpl", "configMapNamespace": "kubeflow"}
+    }
+    with cluster():
+        result = opt.create_experiment_from_spec(spec=manifest)
+    assert result["status"] == "preview"

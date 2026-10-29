@@ -28,6 +28,7 @@ typed classes cannot express (tpe, cmaes, hyperband, ...).
 """
 
 import logging
+import re
 from typing import Any
 
 from kubeflow.optimizer import Search
@@ -37,7 +38,7 @@ from kubeflow_katib_api import models
 from kubeflow_mcp.common import utils as mcp_utils
 from kubeflow_mcp.common.constants import ErrorCode
 from kubeflow_mcp.common.types import PreviewResponse, ToolError, ToolResponse
-from kubeflow_mcp.core.security import validate_k8s_name
+from kubeflow_mcp.core.security import validate_image_reference, validate_k8s_name
 from kubeflow_mcp.optimizer.api._common import check_optimizer_namespace, experiment_error
 from kubeflow_mcp.optimizer.constants import (
     EXPERIMENT_KIND,
@@ -179,6 +180,60 @@ def _resolve_primary_container(trial_template: dict[str, Any], override: str | N
     return trainer_constants.NODE if trainer_constants.NODE in names else names[0]
 
 
+# Katib substitutes ${trialParameters.<name>} throughout the trial spec, so an
+# image may legitimately carry one (a tuned tag, say). Each is swapped for a
+# token that is valid anywhere in a reference before the rest is checked.
+_TRIAL_PARAMETER_REF = re.compile(r"\$\{trialParameters\.[^}]*\}")
+
+
+def _trial_spec_images(trial_spec: Any, field: str) -> list[tuple[str, Any]]:
+    """List ``(field path, image)`` for every container image in a trial spec.
+
+    Covers the shapes ``_resolve_primary_container`` handles: a TrainJob's
+    ``spec.trainer.image``, and the containers of a Job's pod template or of a
+    bare pod spec.
+    """
+    spec = trial_spec.get("spec") if isinstance(trial_spec, dict) else None
+    if not isinstance(spec, dict):
+        return []
+
+    images: list[tuple[str, Any]] = []
+    trainer = spec.get("trainer")
+    if isinstance(trainer, dict) and "image" in trainer:
+        images.append((f"{field}.spec.trainer.image", trainer["image"]))
+
+    template = spec.get("template")
+    pod_spec, pod_path = (
+        (template.get("spec"), f"{field}.spec.template.spec")
+        if isinstance(template, dict)
+        else (spec, f"{field}.spec")
+    )
+    if isinstance(pod_spec, dict):
+        for key in ("initContainers", "containers"):
+            containers = pod_spec.get(key)
+            if not isinstance(containers, list):
+                continue
+            for i, container in enumerate(containers):
+                if isinstance(container, dict) and "image" in container:
+                    images.append((f"{pod_path}.{key}[{i}].image", container["image"]))
+    return images
+
+
+def _validate_trial_images(trial_spec: Any, field: str) -> ToolError | None:
+    """Reject trial images Kubernetes could never pull, before anything is created.
+
+    Without this a malformed image only surfaces once every trial pod fails to
+    pull it, long after the experiment was accepted.
+    """
+    for path, image in _trial_spec_images(trial_spec, field):
+        candidate = _TRIAL_PARAMETER_REF.sub("x", image) if isinstance(image, str) else image
+        err = validate_image_reference(candidate, path)
+        if err is not None:
+            err.details = {"value": image}
+            return err
+    return None
+
+
 def _build_experiment(
     *,
     name: str,
@@ -318,6 +373,10 @@ def create_hpo_experiment(
     if name_err is not None:
         return name_err.model_dump()
 
+    image_err = _validate_trial_images(trial_template, "trial_template")
+    if image_err is not None:
+        return image_err.model_dump()
+
     ns_err = check_optimizer_namespace(namespace)
     if ns_err is not None:
         return ns_err.model_dump()
@@ -420,6 +479,17 @@ def create_experiment_from_spec(
     name_err = validate_k8s_name(name)
     if name_err is not None:
         return name_err.model_dump()
+
+    experiment_spec = spec.get("spec")
+    trial_template = (
+        experiment_spec.get("trialTemplate") if isinstance(experiment_spec, dict) else None
+    )
+    if isinstance(trial_template, dict):
+        image_err = _validate_trial_images(
+            trial_template.get("trialSpec"), "spec.spec.trialTemplate.trialSpec"
+        )
+        if image_err is not None:
+            return image_err.model_dump()
 
     # Check the namespace the experiment will actually be created in. The spec
     # can name its own, so checking only the argument would let
